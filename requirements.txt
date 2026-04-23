@@ -1,0 +1,7 @@
+zmq
+uuid
+pyyaml
+pyaudio
+opencv-python
+numpy
+

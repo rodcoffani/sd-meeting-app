@@ -1,0 +1,20 @@
+broker:
+  text:
+    pub_port: 5551
+    sub_port: 5552
+  audio:
+    pub_port: 5553
+    sub_port: 5554
+  video:
+    pub_port: 5555
+    sub_port: 5556
+
+client:
+  audio:
+    rate: 44100
+    channels: 1
+    chunk: 1024
+  video:
+    device_index: 0
+    frame_width: 640
+    frame_height: 480
