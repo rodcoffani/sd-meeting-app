@@ -36,15 +36,13 @@ def audio_publisher(context):
     socket = context.socket(zmq.PUB)
     socket.connect(f"tcp://localhost:{config['broker']['audio']['sub_port']}")
     p = pyaudio.PyAudio()
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=config["client"]["audio"]["channels"],
-        rate=config["client"]["audio"]["rate"],
-        input=True,
-        frames_per_buffer=config["client"]["audio"]["chunk"],
-    )
+    stream = p.open(format=pyaudio.paInt16,
+                    channels=config['client']['audio']['channels'],
+                    rate=config['client']['audio']['rate'],
+                    input=True,
+                    frames_per_buffer=config['client']['audio']['chunk'])
     while True:
-        data = stream.read(config["client"]["audio"]["chunk"])
+        data = stream.read(config['client']['audio']['chunk'])
         socket.send(data)
 
 
@@ -53,12 +51,10 @@ def audio_subscriber(context):
     socket.connect(f"tcp://localhost:{config['broker']['audio']['pub_port']}")
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
     p = pyaudio.PyAudio()
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=config["client"]["audio"]["channels"],
-        rate=config["client"]["audio"]["rate"],
-        output=True,
-    )
+    stream = p.open(format=pyaudio.paInt16,
+                    channels=config['client']['audio']['channels'],
+                    rate=config['client']['audio']['rate'],
+                    output=True)
     while True:
         data = socket.recv()
         stream.write(data)
@@ -67,14 +63,14 @@ def audio_subscriber(context):
 def video_publisher(context):
     socket = context.socket(zmq.PUB)
     socket.connect(f"tcp://localhost:{config['broker']['video']['sub_port']}")
-    cap = cv2.VideoCapture(config["client"]["video"]["device_index"])
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config["client"]["video"]["frame_width"])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config["client"]["video"]["frame_height"])
+    cap = cv2.VideoCapture(config['client']['video']['device_index'])
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config['client']['video']['frame_width'])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config['client']['video']['frame_height'])
     while True:
         ret, frame = cap.read()
         if not ret:
             continue
-        _, buffer = cv2.imencode(".jpg", frame)
+        _, buffer = cv2.imencode('.jpg', frame)
         socket.send(buffer)
 
 
@@ -86,7 +82,7 @@ def video_subscriber(context):
         buffer = socket.recv()
         frame = cv2.imdecode(np.frombuffer(buffer, dtype=np.uint8), 1)
         cv2.imshow("Video", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
 
