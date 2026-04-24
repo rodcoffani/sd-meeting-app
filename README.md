@@ -9,4 +9,4 @@ Desenvolva uma ferramenta de videoconferência (Vídeo, Áudio e Texto) que perm
 ### Integrantes
 
 - Rodrigo - 800345
--
+- Pedro Yuji Teixeira Harada - 800636
