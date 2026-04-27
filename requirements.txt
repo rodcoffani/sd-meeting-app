@@ -1,0 +1,7 @@
+numpy==2.4.4
+opencv-python==4.13.0.92
+PyAudio==0.2.14
+PyYAML==6.0.3
+pyzmq==27.1.0
+uuid==1.30
+zmq==0.0.0
