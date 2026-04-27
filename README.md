@@ -8,6 +8,8 @@ Desenvolva uma ferramenta de videoconferência (Vídeo, Áudio e Texto) que perm
 
 Ao subir o sistema pela primeira vez, rode o seguinte código no terminal:
 
+> OBS: `setup.sh` é debian-based.
+
 ```bash
 chmod +x setup.sh run_broker.sh run_client.sh
 ./setup.sh
