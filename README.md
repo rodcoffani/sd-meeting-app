@@ -27,4 +27,4 @@ Para subir o sistema novamente, execute:
 - Pedro Yuji Teixeira Harada - 800636
 - Murilo de Miranda Silva - 812069
 - Guilherme Barbosa - 811692
-
+- Sérgio Felipe Bezerra Rabelo - 812205
