@@ -1,4 +1,6 @@
 broker:
+  control:
+    port: 5550
   text:
     pub_port: 5551
     sub_port: 5552

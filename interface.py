@@ -1,14 +1,27 @@
 import tkinter as tk
 from tkinter import messagebox
+import threading
+import cv2
+import numpy as np
+import pyaudio
+import yaml
+from PIL import Image, ImageTk
+
+with open("config.yaml", "r") as f:
+    config = yaml.safe_load(f)
 
 
 class MeetingInterface:
     def __init__(self, root, client_controller):
         self.root = root
         self.root.title("SD Meeting App")
-        self.root.geometry("800x600")
+        self.root.geometry("800x800")
 
         self.client = client_controller
+        self.current_room = None
+        self.video_thread = None
+        self.audio_thread = None
+        self.p = None
 
         self.show_login_screen()
 
@@ -24,7 +37,14 @@ class MeetingInterface:
         self.username_entry = tk.Entry(frame, width=30)
         self.username_entry.pack(pady=5)
 
-        tk.Button(frame, text="Connect", command=self.on_login, width=15).pack(pady=10)
+        button_frame = tk.Frame(frame)
+        button_frame.pack(pady=10)
+        tk.Button(button_frame, text="Connect", command=self.on_login, width=15).pack(
+            side="left", padx=5
+        )
+        tk.Button(button_frame, text="Close", command=self.root.quit, width=15).pack(
+            side="left", padx=5
+        )
 
     def on_login(self):
         username = self.username_entry.get().strip()
@@ -35,6 +55,8 @@ class MeetingInterface:
 
         try:
             self.client.login(username)
+            self.client.set_message_callback(self.display_message)
+            self.client.set_lists_callback(self.on_lists_updated)
             self.show_main_screen()
         except Exception as e:
             messagebox.showerror(
@@ -54,15 +76,24 @@ class MeetingInterface:
             top_frame, text=f"User: {self.client.username}", font=("Arial", 12)
         )
         self.user_label.pack(side="right")
+        tk.Button(top_frame, text="Close", command=self.root.quit).pack(
+            side="right", padx=5
+        )
 
         self.preview_frame = tk.LabelFrame(
             self.root, text="VIDEO PREVIEW", padx=5, pady=5
         )
-        self.preview_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.preview_frame.pack(fill="both", padx=10, pady=5)
         self.preview_label = tk.Label(
-            self.preview_frame, text="(local camera feed)", bg="black", fg="white"
+            self.preview_frame,
+            text="(local camera feed)",
+            bg="black",
+            fg="white",
+            font=("Arial", 14),
         )
-        self.preview_label.pack(fill="both", expand=True)
+        self.preview_label.pack(fill="both")
+
+        self.start_video_preview()
 
         lists_frame = tk.Frame(self.root)
         lists_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -79,7 +110,7 @@ class MeetingInterface:
         self.rooms_listbox = tk.Listbox(rooms_frame)
         self.rooms_listbox.pack(fill="both", expand=True)
 
-        self.refresh_lists()
+        self.client.refresh_lists()
 
         bottom_frame = tk.Frame(self.root)
         bottom_frame.pack(fill="x", padx=10, pady=10)
@@ -95,13 +126,33 @@ class MeetingInterface:
             side="left", padx=5
         )
 
-    def refresh_lists(self):
+    def start_video_preview(self):
+        self.cap = cv2.VideoCapture(config["client"]["video"]["device_index"])
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, config["client"]["video"]["frame_width"])
+        self.cap.set(
+            cv2.CAP_PROP_FRAME_HEIGHT, config["client"]["video"]["frame_height"]
+        )
+
+        def capture():
+            while self.current_room is None and self.cap.isOpened():
+                ret, frame = self.cap.read()
+                if ret:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    img = Image.fromarray(frame)
+                    photo = ImageTk.PhotoImage(img)
+                    self.preview_label.configure(image=photo)
+                    self.preview_label.image = photo
+
+        self.video_thread = threading.Thread(target=capture, daemon=True)
+        self.video_thread.start()
+
+    def on_lists_updated(self, users, rooms):
         self.users_listbox.delete(0, tk.END)
-        for user in self.client.get_online_users():
+        for user in users:
             self.users_listbox.insert(tk.END, user)
 
         self.rooms_listbox.delete(0, tk.END)
-        for room in self.client.get_rooms():
+        for room in rooms:
             self.rooms_listbox.insert(tk.END, room)
 
     def on_join(self):
@@ -112,14 +163,11 @@ class MeetingInterface:
             )
             return
 
-        if not self.client.join_room(target):
-            messagebox.showerror(
-                "Error", f"User or room '{target}' does not exist"
-            )
-            return
-
-        self.current_room = target
-        self.show_call_screen()
+        if self.client.join_room(target):
+            self.current_room = target
+            self.show_call_screen()
+        else:
+            messagebox.showerror("Error", f"Room '{target}' does not exist")
 
     def on_create_room(self):
         room_name = self.connect_entry.get().strip()
@@ -127,12 +175,11 @@ class MeetingInterface:
             messagebox.showwarning("Warning", "Please enter a room name")
             return
 
-        if not self.client.create_room(room_name):
+        if self.client.create_room(room_name):
+            self.current_room = room_name
+            self.show_call_screen()
+        else:
             messagebox.showerror("Error", f"Room '{room_name}' already exists")
-            return
-
-        self.current_room = room_name
-        self.show_call_screen()
 
     def show_call_screen(self):
         self.clear_window()
@@ -144,7 +191,12 @@ class MeetingInterface:
         tk.Label(
             top_frame, text=f"SD Meeting App - {room_title}", font=("Arial", 16, "bold")
         ).pack(side="left")
-        tk.Button(top_frame, text="Leave", command=self.on_leave).pack(side="right")
+        tk.Button(top_frame, text="Leave", command=self.on_leave).pack(
+            side="right", padx=5
+        )
+        tk.Button(top_frame, text="Close", command=self.root.quit).pack(
+            side="right", padx=5
+        )
 
         video_frame = tk.Frame(self.root)
         video_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -158,6 +210,8 @@ class MeetingInterface:
             video_frame, text="(remote video 2)", bg="black", fg="white"
         )
         self.video2_label.pack(side="left", fill="both", expand=True, padx=(2, 0))
+
+        self.client.set_video_callback(self.display_video)
 
         chat_frame = tk.LabelFrame(self.root, text="CHAT", padx=5, pady=5)
         chat_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -177,9 +231,22 @@ class MeetingInterface:
 
         self.chat_entry.bind("<Return>", lambda e: self.on_send_message())
 
+    def display_video(self, frame_data):
+        try:
+            frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), 1)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame)
+            photo = ImageTk.PhotoImage(img)
+            self.video1_label.configure(image=photo)
+            self.video1_label.image = photo
+        except:
+            pass
+
     def on_leave(self):
         self.client.leave_room()
         self.current_room = None
+        if hasattr(self, "cap"):
+            self.cap.release()
         self.show_main_screen()
 
     def on_send_message(self):
@@ -203,10 +270,13 @@ class MeetingInterface:
 
     def run(self):
         self.root.mainloop()
+        if hasattr(self, "cap"):
+            self.cap.release()
 
 
 def main():
     from client import Client
+    import tkinter as tk
 
     root = tk.Tk()
     client = Client()
@@ -216,4 +286,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

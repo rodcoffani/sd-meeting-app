@@ -26,15 +26,21 @@ class Client:
         self.rooms = []
         self.current_room = None
 
+        self.message_callback = None
+        self.video_callback = None
+        self.audio_callback = None
+        self.lists_callback = None
+
     def login(self, username):
         self.username = username
         self.connect_to_broker()
-        self.populate_mock_data()
+        self.start_receive_threads()
+        self.refresh_lists()
 
     def connect_to_broker(self):
         self.control_socket = self.context.socket(zmq.REQ)
         self.control_socket.connect(
-            f"tcp://localhost:{config['broker']['text']['pub_port']}"
+            f"tcp://localhost:{config['broker']['control']['port']}"
         )
 
         self.text_pub = self.context.socket(zmq.PUB)
@@ -66,9 +72,65 @@ class Client:
         )
         self.video_sub.setsockopt_string(zmq.SUBSCRIBE, "")
 
-    def populate_mock_data(self):
-        self.online_users = ["user1", "user2", "user3"]
-        self.rooms = ["room_001", "room_002", "meeting"]
+    def start_receive_threads(self):
+        threading.Thread(target=self._text_receive, daemon=True).start()
+        threading.Thread(target=self._video_receive, daemon=True).start()
+        threading.Thread(target=self._audio_receive, daemon=True).start()
+
+    def _text_receive(self):
+        while True:
+            try:
+                msg = self.text_sub.recv_string()
+                if self.message_callback:
+                    self.message_callback(msg)
+            except:
+                pass
+
+    def _video_receive(self):
+        while True:
+            try:
+                data = self.video_sub.recv()
+                if self.video_callback:
+                    self.video_callback(data)
+            except:
+                pass
+
+    def _audio_receive(self):
+        while True:
+            try:
+                data = self.audio_sub.recv()
+                if self.audio_callback:
+                    self.audio_callback(data)
+            except:
+                pass
+
+    def set_message_callback(self, callback):
+        self.message_callback = callback
+
+    def set_video_callback(self, callback):
+        self.video_callback = callback
+
+    def set_audio_callback(self, callback):
+        self.audio_callback = callback
+
+    def set_lists_callback(self, callback):
+        self.lists_callback = callback
+
+    def refresh_lists(self):
+        try:
+            self.control_socket.send_string(f"LIST_USERS")
+            users = self.control_socket.recv_string()
+            self.online_users = users.split(",") if users else []
+
+            self.control_socket.send_string(f"LIST_ROOMS")
+            room_data = self.control_socket.recv_string()
+            self.rooms = [r.split(":")[0] for r in room_data.split(",")] if room_data else []
+
+            if self.lists_callback:
+                self.lists_callback(self.online_users, self.rooms)
+        except:
+            self.online_users = []
+            self.rooms = []
 
     def get_online_users(self):
         return self.online_users
@@ -77,27 +139,59 @@ class Client:
         return self.rooms
 
     def join_room(self, target):
-        if target not in self.online_users and target not in self.rooms:
-            return False
-
-        self.current_room = target
-        return True
+        try:
+            self.control_socket.send_string(f"JOIN_ROOM:{target}:{self.username}")
+            resp = self.control_socket.recv_string()
+            if resp == "OK":
+                self.current_room = target
+                self.refresh_lists()
+                return True
+        except:
+            pass
+        return False
 
     def create_room(self, room_name):
-        if room_name in self.rooms:
-            return False
-
-        self.rooms.append(room_name)
-        self.current_room = room_name
-        return True
+        try:
+            self.control_socket.send_string(f"CREATE_ROOM:{room_name}")
+            resp = self.control_socket.recv_string()
+            if resp == "OK":
+                self.current_room = room_name
+                self.refresh_lists()
+                return True
+        except:
+            pass
+        return False
 
     def leave_room(self):
+        if self.current_room:
+            try:
+                self.control_socket.send_string(
+                    f"LEAVE_ROOM:{self.current_room}:{self.username}"
+                )
+                self.control_socket.recv_string()
+            except:
+                pass
         self.current_room = None
+        self.refresh_lists()
 
     def send_text_message(self, message):
         if self.text_pub:
             try:
                 self.text_pub.send_string(f"{self.username}: {message}")
+            except:
+                pass
+
+    def send_video_frame(self, frame_data):
+        if self.video_pub:
+            try:
+                self.video_pub.send(frame_data)
+            except:
+                pass
+
+    def send_audio_data(self, audio_data):
+        if self.audio_pub:
+            try:
+                self.audio_pub.send(audio_data)
             except:
                 pass
 
