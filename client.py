@@ -2,96 +2,110 @@ import zmq
 import threading
 import uuid
 import yaml
-import pyaudio
-import cv2
-import numpy as np
-import time
 
 client_id = str(uuid.uuid4())
 
-# Load config
 with open("config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
 
-def text_publisher(context):
-    socket = context.socket(zmq.PUB)
-    socket.connect(f"tcp://localhost:{config['broker']['text']['sub_port']}")
-    time.sleep(1)
-    while True:
-        msg = input("[Text] > ")
-        socket.send_string(f"{client_id}: {msg}")
+class Client:
+    def __init__(self):
+        self.username = ""
+        self.context = zmq.Context()
+
+        self.control_socket = None
+        self.text_pub = None
+        self.text_sub = None
+        self.audio_pub = None
+        self.audio_sub = None
+        self.video_pub = None
+        self.video_sub = None
+
+        self.online_users = []
+        self.rooms = []
+        self.current_room = None
+
+    def login(self, username):
+        self.username = username
+        self.connect_to_broker()
+        self.populate_mock_data()
+
+    def connect_to_broker(self):
+        self.control_socket = self.context.socket(zmq.REQ)
+        self.control_socket.connect(
+            f"tcp://localhost:{config['broker']['text']['pub_port']}"
+        )
+
+        self.text_pub = self.context.socket(zmq.PUB)
+        self.text_pub.connect(f"tcp://localhost:{config['broker']['text']['sub_port']}")
+
+        self.text_sub = self.context.socket(zmq.SUB)
+        self.text_sub.connect(f"tcp://localhost:{config['broker']['text']['pub_port']}")
+        self.text_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+        self.audio_pub = self.context.socket(zmq.PUB)
+        self.audio_pub.connect(
+            f"tcp://localhost:{config['broker']['audio']['sub_port']}"
+        )
+
+        self.audio_sub = self.context.socket(zmq.SUB)
+        self.audio_sub.connect(
+            f"tcp://localhost:{config['broker']['audio']['pub_port']}"
+        )
+        self.audio_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+        self.video_pub = self.context.socket(zmq.PUB)
+        self.video_pub.connect(
+            f"tcp://localhost:{config['broker']['video']['sub_port']}"
+        )
+
+        self.video_sub = self.context.socket(zmq.SUB)
+        self.video_sub.connect(
+            f"tcp://localhost:{config['broker']['video']['pub_port']}"
+        )
+        self.video_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+    def populate_mock_data(self):
+        self.online_users = ["user1", "user2", "user3"]
+        self.rooms = ["room_001", "room_002", "meeting"]
+
+    def get_online_users(self):
+        return self.online_users
+
+    def get_rooms(self):
+        return self.rooms
+
+    def join_room(self, target):
+        if target not in self.online_users and target not in self.rooms:
+            return False
+
+        self.current_room = target
+        return True
+
+    def create_room(self, room_name):
+        if room_name in self.rooms:
+            return False
+
+        self.rooms.append(room_name)
+        self.current_room = room_name
+        return True
+
+    def leave_room(self):
+        self.current_room = None
+
+    def send_text_message(self, message):
+        if self.text_pub:
+            try:
+                self.text_pub.send_string(f"{self.username}: {message}")
+            except:
+                pass
 
 
-def text_subscriber(context):
-    socket = context.socket(zmq.SUB)
-    socket.connect(f"tcp://localhost:{config['broker']['text']['pub_port']}")
-    socket.setsockopt_string(zmq.SUBSCRIBE, "")
-    while True:
-        msg = socket.recv_string()
-        print(f"[Text] Received: {msg}")
-
-
-def audio_publisher(context):
-    socket = context.socket(zmq.PUB)
-    socket.connect(f"tcp://localhost:{config['broker']['audio']['sub_port']}")
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=config['client']['audio']['channels'],
-                    rate=config['client']['audio']['rate'],
-                    input=True,
-                    frames_per_buffer=config['client']['audio']['chunk'])
-    while True:
-        data = stream.read(config['client']['audio']['chunk'])
-        socket.send(data)
-
-
-def audio_subscriber(context):
-    socket = context.socket(zmq.SUB)
-    socket.connect(f"tcp://localhost:{config['broker']['audio']['pub_port']}")
-    socket.setsockopt_string(zmq.SUBSCRIBE, "")
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16,
-                    channels=config['client']['audio']['channels'],
-                    rate=config['client']['audio']['rate'],
-                    output=True)
-    while True:
-        data = socket.recv()
-        stream.write(data)
-
-
-def video_publisher(context):
-    socket = context.socket(zmq.PUB)
-    socket.connect(f"tcp://localhost:{config['broker']['video']['sub_port']}")
-    cap = cv2.VideoCapture(config['client']['video']['device_index'])
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, config['client']['video']['frame_width'])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config['client']['video']['frame_height'])
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        _, buffer = cv2.imencode('.jpg', frame)
-        socket.send(buffer)
-
-
-def video_subscriber(context):
-    socket = context.socket(zmq.SUB)
-    socket.connect(f"tcp://localhost:{config['broker']['video']['pub_port']}")
-    socket.setsockopt_string(zmq.SUBSCRIBE, "")
-    while True:
-        buffer = socket.recv()
-        frame = cv2.imdecode(np.frombuffer(buffer, dtype=np.uint8), 1)
-        cv2.imshow("Video", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+def main():
+    client = Client()
+    print("Client initialized. Use interface.py to run the GUI.")
 
 
 if __name__ == "__main__":
-    context = zmq.Context()
-
-    threading.Thread(target=text_publisher, args=(context,)).start()
-    threading.Thread(target=text_subscriber, args=(context,)).start()
-    threading.Thread(target=audio_publisher, args=(context,)).start()
-    threading.Thread(target=audio_subscriber, args=(context,)).start()
-    threading.Thread(target=video_publisher, args=(context,)).start()
-    threading.Thread(target=video_subscriber, args=(context,)).start()
+    main()
