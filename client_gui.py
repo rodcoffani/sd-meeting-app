@@ -19,7 +19,6 @@ Uso:
 
 import json
 import queue
-import select
 import sys
 import threading
 import time
@@ -28,8 +27,8 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import uuid
 
-import yaml
 import zmq
+from client import _load_cfg as load_config, DiscoveryClient, TextQoS, VideoQoS, GUIClientSession
 
 try:
     from PIL import Image, ImageTk, ImageDraw, ImageFont
@@ -74,125 +73,6 @@ FONT_BOLD = ("Segoe UI", 10, "bold")
 FONT_MONO = ("Consolas",  9)
 FONT_TITLE= ("Segoe UI", 13, "bold")
 FONT_SMALL= ("Segoe UI",  8)
-
-
-# ---------------------------------------------------------------------------
-# Configuração
-# ---------------------------------------------------------------------------
-
-def _load_cfg() -> dict:
-    with open("config.yaml") as f:
-        return yaml.safe_load(f)
-
-
-# ---------------------------------------------------------------------------
-# QoS — Texto (ACK + fila de reenvio, thread-safe)
-# ---------------------------------------------------------------------------
-
-class TextQoS:
-    def __init__(self, cfg):
-        q = cfg["qos"]["text"]
-        self._max_retry = q["max_retry"]
-        self._retry_ivl = q["retry_interval"]
-        self._pending: dict[str, dict] = {}
-        self._lock  = threading.Lock()
-        self._out_q: queue.Queue = queue.Queue()
-
-    def send(self, msg_dict: dict):
-        mid  = msg_dict["msg_id"]
-        data = json.dumps(msg_dict).encode()
-        with self._lock:
-            self._pending[mid] = {"data": data, "retries": 0, "ts": time.time()}
-        self._out_q.put(data)
-
-    def ack(self, msg_id: str):
-        with self._lock:
-            self._pending.pop(msg_id, None)
-
-    def get_next(self, timeout: float = 0):
-        try:
-            return self._out_q.get(timeout=timeout)
-        except queue.Empty:
-            return None
-
-    def retry_loop(self, stop: threading.Event):
-        while not stop.is_set():
-            now = time.time()
-            with self._lock:
-                expired = []
-                for mid, p in self._pending.items():
-                    if now - p["ts"] >= self._retry_ivl:
-                        if p["retries"] >= self._max_retry:
-                            expired.append(mid)
-                        else:
-                            self._out_q.put(p["data"])
-                            p["retries"] += 1
-                            p["ts"] = now
-                for mid in expired:
-                    del self._pending[mid]
-            stop.wait(0.05)
-
-
-# ---------------------------------------------------------------------------
-# QoS — Vídeo (FPS e qualidade adaptativos)
-# ---------------------------------------------------------------------------
-
-class VideoQoS:
-    def __init__(self, cfg):
-        q = cfg["qos"]["video"]
-        self.quality     = q["jpeg_quality"]
-        self.min_quality = q["min_jpeg_quality"]
-        self.fps         = q["base_fps"]
-        self.min_fps     = q["min_fps"]
-        self.base_fps    = q["base_fps"]
-        self._last       = 0.0
-
-    def should_send(self) -> bool:
-        now = time.time()
-        if now - self._last >= 1.0 / self.fps:
-            self._last = now
-            return True
-        return False
-
-    def encode(self, frame) -> bytes | None:
-        ok, buf = cv2.imencode(
-            ".jpg", frame,
-            [cv2.IMWRITE_JPEG_QUALITY, int(self.quality)]
-        )
-        return buf.tobytes() if ok else None
-
-    def degrade(self):
-        self.quality = max(self.min_quality, self.quality - 10)
-        self.fps     = max(self.min_fps, self.fps - 2)
-
-    def recover(self):
-        self.quality = min(70, self.quality + 5)
-        self.fps     = min(self.base_fps, self.fps + 1)
-
-
-# ---------------------------------------------------------------------------
-# Service Discovery
-# ---------------------------------------------------------------------------
-
-class DiscoveryClient:
-    def __init__(self, cfg):
-        self._host = cfg["registry"]["host"]
-        self._port = cfg["registry"]["port"]
-
-    def query_room(self, room: str, timeout_ms: int = 2000) -> dict | None:
-        ctx  = zmq.Context.instance()
-        sock = ctx.socket(zmq.REQ)
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        sock.connect(f"tcp://{self._host}:{self._port}")
-        try:
-            sock.send_string(json.dumps({"type": "query_room", "room": room}))
-            resp = json.loads(sock.recv_string())
-            return resp.get("broker") if resp.get("status") == "ok" else None
-        except Exception:
-            return None
-        finally:
-            sock.close()
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +168,7 @@ class ConferenceApp:
     SELF_W, SELF_H = 200, 150  # self-preview
 
     def __init__(self):
-        self.cfg       = _load_cfg()
+        self.cfg       = load_config()
         self.client_id = str(uuid.uuid4())
         self.username  = None
         self.room      = None
@@ -303,9 +183,11 @@ class ConferenceApp:
         self._stop    = threading.Event()
         self._gui_q:  queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
-        self._text_qos  = TextQoS(self.cfg)
-        self._video_qos = VideoQoS(self.cfg) if _VIDEO_OK else None
         self._discovery = DiscoveryClient(self.cfg)
+
+        # Network session
+        self._network_session = GUIClientSession(self.cfg, self.client_id, 
+                                                 self._gui_q, self._stop)
 
         # Audio callback buffering
         self.recv_queue = queue.Queue()  # Buffers received audio frames for output callback
@@ -404,10 +286,10 @@ class ConferenceApp:
         threading.Thread(target=self._connect_and_launch, daemon=True).start()
 
     def _connect_and_launch(self):
+        self._network_session.set_credentials(self.username, self.room)
         for i in range(15):
-            info = self._discovery.query_room(self.room)
-            if info:
-                self.broker = info
+            if self._network_session.discover_broker(max_retries=1, delay=0):
+                self.broker = self._network_session.broker
                 self.root.after(0, self._switch_to_conference)
                 return
             self.root.after(0, lambda i=i: self._login_status.config(
@@ -426,7 +308,9 @@ class ConferenceApp:
             self.root.geometry(f"{self.REM_W + self.SELF_W + 260}x"
                                f"{self.REM_H + self.SELF_H + 120}")
             self._build_conference()
-            self._start_zmq()
+            if not self._start_network():
+                messagebox.showerror("Erro", "Falha ao conectar à rede")
+                return
             self.root.after(33, self._poll_gui_queue)
         except Exception:
             err = traceback.format_exc()
@@ -587,18 +471,10 @@ class ConferenceApp:
 
     def _send_text(self):
         content = self._chat_entry.get().strip()
-        if not content or not hasattr(self, "_sock_text_push"):
+        if not content:
             return
         self._chat_entry.delete(0, "end")
-        self._text_qos.send({
-            "v": 1, "type": "text",
-            "msg_id":    str(uuid.uuid4()),
-            "room":      self.room,
-            "sender_id": self.client_id,
-            "username":  self.username,
-            "content":   content,
-            "ts":        time.time(),
-        })
+        self._network_session.send_text(content)
         # Exibe no chat local imediatamente
         self._append_chat(self.username, content, time.time(), is_me=True)
 
@@ -606,7 +482,8 @@ class ConferenceApp:
         if messagebox.askyesno("Sair", "Deseja sair da sala?",
                                parent=self.root):
             self._stop.set()
-            self._cleanup_sockets()
+            self._network_session.stop()
+            self._cleanup_audio()
             self._conf_frame.destroy()
             self._build_login()
             self.root.geometry("420x340")
@@ -614,7 +491,8 @@ class ConferenceApp:
             self.broker    = None
             self.username  = None
             self.room      = None
-            self._text_qos = TextQoS(self.cfg)
+            self._network_session = GUIClientSession(self.cfg, self.client_id,
+                                                     self._gui_q, self._stop)
 
     def _on_close(self):
         self._stop.set()
@@ -636,10 +514,10 @@ class ConferenceApp:
                     self._update_members(item["members"])
                 elif t == "video_remote":
                     self._video_remote.show_frame(item["jpeg"])
-                    if self._video_qos:
+                    if self._network_session and self._network_session._video_qos:
                         self._quality_lbl.config(
-                            text=f"Q:{int(self._video_qos.quality)}% "
-                                 f"{int(self._video_qos.fps)}fps"
+                            text=f"Q:{int(self._network_session._video_qos.quality)}% "
+                                 f"{int(self._network_session._video_qos.fps)}fps"
                         )
                 elif t == "video_self":
                     if self.camera_on:
@@ -695,117 +573,42 @@ class ConferenceApp:
         if hasattr(self, "_status_lbl"):
             self._status_lbl.config(text=msg, fg=color)
 
-    # ------------------------------------------------------------------
-    # ZeroMQ — conexão e threads
-    # ------------------------------------------------------------------
-
-    def _make_sockets(self) -> dict:
-        h = self.broker["host"]
-        P = self.broker["ports"]
-        ctx = zmq.Context.instance()
-        s = {}
-
-        s["text_push"] = ctx.socket(zmq.PUSH)
-        s["text_push"].connect(f"tcp://{h}:{P['text_pull']}")
-
-        s["text_sub"] = ctx.socket(zmq.SUB)
-        s["text_sub"].connect(f"tcp://{h}:{P['text_pub']}")
-        s["text_sub"].setsockopt_string(zmq.SUBSCRIBE, f"text:{self.room}")
-
-        s["audio_push"] = ctx.socket(zmq.PUSH)
-        s["audio_push"].connect(f"tcp://{h}:{P['audio_pull']}")
-
-        s["audio_sub"] = ctx.socket(zmq.SUB)
-        s["audio_sub"].connect(f"tcp://{h}:{P['audio_pub']}")
-        s["audio_sub"].setsockopt_string(zmq.SUBSCRIBE, f"audio:{self.room}")
-
-        s["video_push"] = ctx.socket(zmq.PUSH)
-        s["video_push"].connect(f"tcp://{h}:{P['video_pull']}")
-
-        s["video_sub"] = ctx.socket(zmq.SUB)
-        s["video_sub"].connect(f"tcp://{h}:{P['video_pub']}")
-        s["video_sub"].setsockopt_string(zmq.SUBSCRIBE, f"video:{self.room}")
-
-        s["ctrl"] = ctx.socket(zmq.DEALER)
-        s["ctrl"].setsockopt_string(zmq.IDENTITY, self.client_id)
-        s["ctrl"].connect(f"tcp://{h}:{P['control']}")
-
-        s["hb_sub"] = ctx.socket(zmq.SUB)
-        s["hb_sub"].connect(f"tcp://{h}:{P['heartbeat']}")
-        s["hb_sub"].setsockopt_string(zmq.SUBSCRIBE, "hb")
-
-        return s
-
-    def _close_sockets(self, socks: dict):
-        for sock in socks.values():
+    def _cleanup_audio(self):
+        """Encerra streams de áudio."""
+        if self.audio_stream:
             try:
-                sock.setsockopt(zmq.LINGER, 0)
-                sock.close()
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
             except Exception:
                 pass
+            self.audio_stream = None
+        if self.p:
+            try:
+                self.p.terminate()
+            except Exception:
+                pass
+            self.p = None
 
-    def _cleanup_sockets(self):
-        if hasattr(self, "_socks"):
-            self._close_sockets(self._socks)
-            del self._socks
+    # ------------------------------------------------------------------
+    # Gerenciamento de rede via GUIClientSession
+    # ------------------------------------------------------------------
 
-    def _do_zmq_login(self, ctrl: zmq.Socket) -> bool:
-        msg = json.dumps({
-            "v": 1, "type": "login",
-            "sender_id": self.client_id,
-            "username":  self.username,
-            "room":      self.room,
-        }).encode()
-        ctrl.send(msg)
-        poller = zmq.Poller()
-        poller.register(ctrl, zmq.POLLIN)
-        evts = dict(poller.poll(timeout=4000))
-        if ctrl in evts:
-            resp = json.loads(ctrl.recv())
-            if resp.get("type") == "login_ack":
-                members = resp.get("members", {})
-                self._gui_q.put({"type": "presence", "members": members})
-                self._gui_q.put({"type": "status", "msg": "● Conectado",
-                                 "color": C_GREEN})
-                return True
-        return False
-
-    def _start_zmq(self):
-        self._stop.clear()
-        self._socks = self._make_sockets()
-        self._sock_text_push = self._socks["text_push"]
-
-        if not self._do_zmq_login(self._socks["ctrl"]):
-            self._gui_q.put({"type": "status",
-                             "msg": "⚠ Falha no login", "color": C_ACCENT})
-            return
-
-        # Start audio stream with callbacks (replaces explicit audio threads)
+    def _start_network(self):
+        """Inicia conexão de rede e streams de áudio."""
+        self._network_session.set_credentials(self.username, self.room)
+        
+        # Inicia stream de áudio com callbacks
         self._start_audio_stream()
-
-        specs = [
-            ("text-send",  self._th_text_send,  self._socks["text_push"]),
-            ("text-recv",  self._th_text_recv,  self._socks["text_sub"]),
-            ("ctrl-recv",  self._th_ctrl_recv,  self._socks["ctrl"]),
-            ("audio-zmq-recv", self._th_audio_zmq_recv, self._socks["audio_sub"]),
-            ("video-send", self._th_video_send, self._socks["video_push"]),
-            ("video-recv", self._th_video_recv, self._socks["video_sub"]),
-            ("hb-monitor", self._th_hb_monitor, self._socks["hb_sub"]),
-        ]
-        self._threads = []
-        for name, fn, sock in specs:
-            t = threading.Thread(target=fn, args=(sock,),
-                                 name=name, daemon=True)
-            t.start()
-            self._threads.append(t)
-
-        t = threading.Thread(target=self._text_qos.retry_loop,
-                             args=(self._stop,), daemon=True)
-        t.start()
-        self._threads.append(t)
+        
+        # Inicia as threads de rede
+        if not self._network_session.start(self.recv_queue):
+            messagebox.showerror("Erro", "Falha ao conectar ao broker")
+            return False
+        
+        return True
 
     def _start_audio_stream(self):
-        """Initialize PyAudio streams with input/output callbacks for ZMQ integration."""
+        """Inicializa stream de áudio bidirecional com callbacks."""
         if not _AUDIO_OK or sys.platform == "win32":
             return
         
@@ -817,7 +620,6 @@ class ConferenceApp:
             return
         
         try:
-            # Create a bidirectional stream: input captures mic, output plays received audio
             self.audio_stream = self.p.open(
                 format=pyaudio.paInt16,
                 channels=cfg["channels"],
@@ -837,236 +639,24 @@ class ConferenceApp:
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         """
-        Bidirectional PyAudio callback: captures input, sends to ZMQ; receives from ZMQ, outputs.
-        Args:
-            in_data: Captured microphone PCM bytes
-            frame_count: Number of frames in in_data
-            time_info: Stream timing info (unused)
-            status: Stream status flags (unused)
-        Returns:
-            Tuple of (out_data, paContinue_flag) for output stream
+        Callback de áudio bidirecional: captura entrada de microfone, envia para rede;
+        recebe áudio da rede e retorna para saída.
         """
-        # Process input: send to network if not muted
-        if hasattr(self, "_socks") and hasattr(self, "_socks") and "audio_push" in self._socks:
-            if not self.muted:
-                try:
-                    meta = json.dumps({
-                        "v": 1, "type": "audio",
-                        "room": self.room, "sender_id": self.client_id,
-                    }).encode()
-                    self._socks["audio_push"].send_multipart([meta, in_data], flags=zmq.NOBLOCK)
-                except Exception:
-                    pass
+        # Enviar áudio capturado se não mutado
+        if not self.muted and self._network_session:
+            self._network_session.send_audio(in_data, self.muted)
         
-        # Process output: return buffered audio from network or silence
+        # Retornar áudio para saída (buffered ou silêncio)
         out_data = b''
         if self.speaker_on:
             try:
                 out_data = self.recv_queue.get_nowait()
             except queue.Empty:
-                # No buffered audio; return silence
                 out_data = b'\x00' * len(in_data)
         else:
-            # Speaker is off; return silence
             out_data = b'\x00' * len(in_data)
         
         return (out_data, pyaudio.paContinue)
-
-    # ------------------------------------------------------------------
-    # Threads ZMQ
-    # ------------------------------------------------------------------
-
-    def _th_text_send(self, sock: zmq.Socket):
-        while not self._stop.is_set():
-            data = self._text_qos.get_next(timeout=0)
-            if data:
-                try:
-                    sock.send(data, flags=zmq.NOBLOCK)
-                except Exception:
-                    pass
-            else:
-                self._stop.wait(0.05)
-
-    def _th_text_recv(self, sock: zmq.Socket):
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            evts = dict(poller.poll(timeout=500))
-            if sock not in evts:
-                continue
-            frames = sock.recv_multipart()
-            if len(frames) < 2:
-                continue
-            try:
-                msg = json.loads(frames[1])
-            except Exception:
-                continue
-            t = msg.get("type")
-            if t == "text" and msg.get("sender_id") != self.client_id:
-                self._gui_q.put({
-                    "type":     "text",
-                    "username": msg.get("username", "?"),
-                    "content":  msg.get("content", ""),
-                    "ts":       msg.get("ts", time.time()),
-                })
-            elif t == "presence":
-                self._gui_q.put({
-                    "type":    "presence",
-                    "members": msg.get("members", {}),
-                })
-
-    def _th_ctrl_recv(self, sock: zmq.Socket):
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            evts = dict(poller.poll(timeout=500))
-            if sock not in evts:
-                continue
-            try:
-                msg = json.loads(sock.recv())
-                if msg.get("type") == "text_ack":
-                    self._text_qos.ack(msg.get("msg_id", ""))
-            except Exception:
-                pass
-
-    def _th_audio_zmq_recv(self, sock: zmq.Socket):
-        """Lightweight thread: polls ZMQ SUB socket and queues audio frames for output callback."""
-        if not _AUDIO_OK or sys.platform == "win32":
-            return
-        
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        
-        while not self._stop.is_set():
-            evts = dict(poller.poll(timeout=500))
-            if sock not in evts:
-                continue
-            
-            try:
-                frames = sock.recv_multipart()
-                if len(frames) < 3:
-                    continue
-                
-                # Parse metadata
-                try:
-                    meta = json.loads(frames[1])
-                except Exception:
-                    continue
-                
-                # Ignore own audio
-                if meta.get("sender_id") == self.client_id:
-                   continue
-                
-                # Queue the audio frame (frames[2] is the PCM data)
-                # Use non-blocking put to avoid starving the audio callback
-                try:
-                    self.recv_queue.put_nowait(frames[2])
-                except queue.Full:
-                    # Queue overflow; drop oldest frame to make room
-                    try:
-                        self.recv_queue.get_nowait()
-                        self.recv_queue.put_nowait(frames[2])
-                    except Exception:
-                        pass
-            
-            except Exception:
-                pass
-
-    def _th_video_send(self, sock: zmq.Socket):
-        if not _VIDEO_OK or self._video_qos is None:
-            return
-        vcfg = self.cfg["client"]["video"]
-        try:
-            cap = cv2.VideoCapture(vcfg["device_index"])
-        except Exception:
-            return
-        if not cap.isOpened():
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  vcfg["frame_width"])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, vcfg["frame_height"])
-        while not self._stop.is_set():
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            # Atualiza self-preview na GUI
-            self._gui_q.put({"type": "video_self", "frame": frame.copy()})
-            if not self.camera_on:
-                time.sleep(0.05)
-                continue
-            if not self._video_qos.should_send():
-                time.sleep(0.01)
-                continue
-            jpeg = self._video_qos.encode(frame)
-            if jpeg is None:
-                continue
-            meta = json.dumps({
-                "v": 1, "type": "video",
-                "room": self.room, "sender_id": self.client_id,
-                "quality": int(self._video_qos.quality),
-            }).encode()
-            try:
-                sock.send_multipart([meta, jpeg], flags=zmq.NOBLOCK)
-            except zmq.Again:
-                self._video_qos.degrade()
-        cap.release()
-
-    def _th_video_recv(self, sock: zmq.Socket):
-        if not _VIDEO_OK:
-            return
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        frame_count = 0
-        while not self._stop.is_set():
-            evts = dict(poller.poll(timeout=500))
-            if sock not in evts:
-                continue
-            frames = sock.recv_multipart()
-            if len(frames) < 3:
-                continue
-            try:
-                meta = json.loads(frames[1])
-            except Exception:
-                continue
-            if meta.get("sender_id") == self.client_id:
-                continue
-            self._gui_q.put({"type": "video_remote", "jpeg": frames[2]})
-            frame_count += 1
-            if frame_count % 30 == 0 and self._video_qos:
-                self._video_qos.recover()
-
-    def _th_hb_monitor(self, sock: zmq.Socket):
-        timeout  = self.cfg["cluster"]["heartbeat_timeout"]
-        last_hb  = time.time()
-        poller   = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
-        while not self._stop.is_set():
-            evts = dict(poller.poll(timeout=1000))
-            if sock in evts:
-                try:
-                    sock.recv_multipart()
-                    last_hb = time.time()
-                except Exception:
-                    pass
-            elif time.time() - last_hb > timeout:
-                self._gui_q.put({"type": "reconnecting"})
-                self._stop.set()
-                threading.Thread(target=self._reconnect, daemon=True).start()
-                return
-
-    def _reconnect(self):
-        self._cleanup_sockets()
-        time.sleep(2)
-        for _ in range(30):
-            info = self._discovery.query_room(self.room)
-            if info:
-                self.broker = info
-                self._start_zmq()
-                self._gui_q.put({"type": "reconnected"})
-                self.root.after(0, lambda: self.root.after(33, self._poll_gui_queue))
-                return
-            time.sleep(1)
-        self._gui_q.put({"type": "status",
-                         "msg": "⚠ Sem broker disponível", "color": C_ACCENT})
 
 
 # ---------------------------------------------------------------------------
