@@ -81,20 +81,43 @@ def assign_rooms(idx: int, cfg: dict) -> list:
 class RoomManager:
     def __init__(self):
         self._lock  = threading.Lock()
-        self._rooms: dict[str, dict[str, str]] = {}  # room → {client_id: username}
+        self._rooms: dict[str, dict[str, dict[str, float | str]]]
+        self._rooms = {}  # room → {client_id: {username, last_seen}}
 
     def join(self, room: str, client_id: str, username: str):
         with self._lock:
-            self._rooms.setdefault(room, {})[client_id] = username
+            self._rooms.setdefault(room, {})[client_id] = {
+                "username": username,
+                "last_seen": time.time(),
+            }
 
     def leave(self, room: str, client_id: str):
         with self._lock:
             if room in self._rooms:
                 self._rooms[room].pop(client_id, None)
 
+    def heartbeat(self, room: str, client_id: str):
+        with self._lock:
+            if room in self._rooms and client_id in self._rooms[room]:
+                self._rooms[room][client_id]["last_seen"] = time.time()
+
+    def prune_stale(self, timeout: float) -> list[str]:
+        now = time.time()
+        changed_rooms: list[str] = []
+        with self._lock:
+            for room, members in list(self._rooms.items()):
+                stale = [cid for cid, data in members.items()
+                         if now - float(data.get("last_seen", now)) > timeout]
+                if stale:
+                    for cid in stale:
+                        members.pop(cid, None)
+                    changed_rooms.append(room)
+        return changed_rooms
+
     def members(self, room: str) -> dict:
         with self._lock:
-            return dict(self._rooms.get(room, {}))
+            members = self._rooms.get(room, {})
+            return {cid: str(data["username"]) for cid, data in members.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +343,10 @@ class Broker:
             members = self.rooms_mgr.members(room)
             self._publish_presence(room, members, text_pub)
 
+        elif t == "hb":
+            sender_id = msg.get("sender_id", client_id.decode())
+            self.rooms_mgr.heartbeat(room, sender_id)
+
     def _publish_presence(self, room: str, members: dict, text_pub: zmq.Socket):
         msg = json.dumps({
             "v": 1, "type": "presence",
@@ -420,6 +447,7 @@ class Broker:
 
         last_hb_send  = 0.0
         last_peer_chk = 0.0
+        last_member_chk = 0.0
 
         try:
             while True:
@@ -474,6 +502,16 @@ class Broker:
                         print(f"[Broker-{self.idx}] Peer {bid[:8]} morto "
                               f"(sem heartbeat > {self._hb_timeout}s)")
                     last_peer_chk = now
+
+                # Remove membros que pararam de enviar heartbeat
+                if now - last_member_chk > 2.0:
+                    changed_rooms = self.rooms_mgr.prune_stale(
+                        self.cfg["cluster"]["heartbeat_timeout"]
+                    )
+                    for room in changed_rooms:
+                        members = self.rooms_mgr.members(room)
+                        self._publish_presence(room, members, text_pub)
+                    last_member_chk = now
 
         except KeyboardInterrupt:
             print(f"\n[Broker-{self.idx}] Encerrando...")

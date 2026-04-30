@@ -205,6 +205,7 @@ class GUIClientSession:
         self._stop     = stop
         self._camera_enabled = threading.Event()
         self._camera_enabled.set()  # Camera starts enabled
+        self._hb_interval = self.cfg["cluster"].get("heartbeat_interval", 2.0)
         self._threads: list[threading.Thread] = []
         self._socks: dict[str, zmq.Socket] = {}
         self._discovery = DiscoveryClient(cfg)
@@ -275,6 +276,10 @@ class GUIClientSession:
         s["ctrl"] = ctx.socket(zmq.DEALER)
         s["ctrl"].setsockopt_string(zmq.IDENTITY, self.client_id)
         s["ctrl"].connect(f"tcp://{h}:{P['control']}")
+
+        s["hb_ctrl"] = ctx.socket(zmq.DEALER)
+        s["hb_ctrl"].setsockopt_string(zmq.IDENTITY, f"{self.client_id}-hb")
+        s["hb_ctrl"].connect(f"tcp://{h}:{P['control']}")
 
         s["hb_sub"] = ctx.socket(zmq.SUB)
         s["hb_sub"].connect(f"tcp://{h}:{P['heartbeat']}")
@@ -422,6 +427,24 @@ class GUIClientSession:
                     self._text_qos.ack(msg.get("msg_id", ""))
             except Exception:
                 pass
+
+    def _th_client_hb(self):
+        """Envia heartbeat periódico do cliente para manter presença ativa."""
+        if not self._socks or "hb_ctrl" not in self._socks:
+            return
+        while not self._stop.is_set():
+            try:
+                msg = json.dumps({
+                    "v": 1,
+                    "type": "hb",
+                    "room": self.room,
+                    "sender_id": self.client_id,
+                    "ts": time.time(),
+                }).encode()
+                self._socks["hb_ctrl"].send(msg, flags=zmq.NOBLOCK)
+            except Exception:
+                pass
+            self._stop.wait(self._hb_interval)
 
     def _th_audio_zmq_recv(self, recv_queue: queue.Queue):
         """Recebe áudio do broker e enfileira para o callback de saída."""
@@ -579,6 +602,7 @@ class GUIClientSession:
             ("text-send",  self._th_text_send),
             ("text-recv",  self._th_text_recv),
             ("ctrl-recv",  self._th_ctrl_recv),
+            ("client-hb",   self._th_client_hb),
             ("video-send", self._th_video_send),
             ("video-recv", self._th_video_recv),
             ("hb-monitor", self._th_hb_monitor),
