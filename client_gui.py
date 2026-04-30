@@ -750,6 +750,7 @@ class ConferenceApp:
     def _start_network(self):
         """Inicia conexão de rede e streams de áudio."""
         self._network_session.set_credentials(self.username, self.room)
+        self._network_session.set_camera_enabled(self.camera_on)
         
         # Inicia stream de áudio com callbacks
         self._start_audio_stream()
