@@ -307,6 +307,11 @@ class ConferenceApp:
         self._video_qos = VideoQoS(self.cfg) if _VIDEO_OK else None
         self._discovery = DiscoveryClient(self.cfg)
 
+        # Audio callback buffering
+        self.recv_queue = queue.Queue()  # Buffers received audio frames for output callback
+        self.p = None                    # PyAudio instance
+        self.audio_stream = None         # Combined input/output stream with callbacks
+
         # Tkinter
         self.root = tk.Tk()
         self.root.title("sd-meeting")
@@ -775,12 +780,14 @@ class ConferenceApp:
                              "msg": "⚠ Falha no login", "color": C_ACCENT})
             return
 
+        # Start audio stream with callbacks (replaces explicit audio threads)
+        self._start_audio_stream()
+
         specs = [
             ("text-send",  self._th_text_send,  self._socks["text_push"]),
             ("text-recv",  self._th_text_recv,  self._socks["text_sub"]),
             ("ctrl-recv",  self._th_ctrl_recv,  self._socks["ctrl"]),
-            ("audio-send", self._th_audio_send, self._socks["audio_push"]),
-            ("audio-recv", self._th_audio_recv, self._socks["audio_sub"]),
+            ("audio-zmq-recv", self._th_audio_zmq_recv, self._socks["audio_sub"]),
             ("video-send", self._th_video_send, self._socks["video_push"]),
             ("video-recv", self._th_video_recv, self._socks["video_sub"]),
             ("hb-monitor", self._th_hb_monitor, self._socks["hb_sub"]),
@@ -796,6 +803,74 @@ class ConferenceApp:
                              args=(self._stop,), daemon=True)
         t.start()
         self._threads.append(t)
+
+    def _start_audio_stream(self):
+        """Initialize PyAudio streams with input/output callbacks for ZMQ integration."""
+        if not _AUDIO_OK or sys.platform == "win32":
+            return
+        
+        cfg = self.cfg["client"]["audio"]
+        try:
+            self.p = pyaudio.PyAudio()
+        except Exception as e:
+            print(f"[Audio] Failed to initialize PyAudio: {e}", file=sys.stderr)
+            return
+        
+        try:
+            # Create a bidirectional stream: input captures mic, output plays received audio
+            self.audio_stream = self.p.open(
+                format=pyaudio.paInt16,
+                channels=cfg["channels"],
+                rate=cfg["rate"],
+                input=True,
+                output=True,
+                frames_per_buffer=cfg["chunk"],
+                stream_callback=self._audio_callback
+            )
+            self.audio_stream.start_stream()
+        except Exception as e:
+            print(f"[Audio] Failed to open stream: {e}", file=sys.stderr)
+            if self.p:
+                self.p.terminate()
+                self.p = None
+            return
+
+    def _audio_callback(self, in_data, frame_count, time_info, status):
+        """
+        Bidirectional PyAudio callback: captures input, sends to ZMQ; receives from ZMQ, outputs.
+        Args:
+            in_data: Captured microphone PCM bytes
+            frame_count: Number of frames in in_data
+            time_info: Stream timing info (unused)
+            status: Stream status flags (unused)
+        Returns:
+            Tuple of (out_data, paContinue_flag) for output stream
+        """
+        # Process input: send to network if not muted
+        if hasattr(self, "_socks") and hasattr(self, "_socks") and "audio_push" in self._socks:
+            if not self.muted:
+                try:
+                    meta = json.dumps({
+                        "v": 1, "type": "audio",
+                        "room": self.room, "sender_id": self.client_id,
+                    }).encode()
+                    self._socks["audio_push"].send_multipart([meta, in_data], flags=zmq.NOBLOCK)
+                except Exception:
+                    pass
+        
+        # Process output: return buffered audio from network or silence
+        out_data = b''
+        if self.speaker_on:
+            try:
+                out_data = self.recv_queue.get_nowait()
+            except queue.Empty:
+                # No buffered audio; return silence
+                out_data = b'\x00' * len(in_data)
+        else:
+            # Speaker is off; return silence
+            out_data = b'\x00' * len(in_data)
+        
+        return (out_data, pyaudio.paContinue)
 
     # ------------------------------------------------------------------
     # Threads ZMQ
@@ -854,73 +929,48 @@ class ConferenceApp:
             except Exception:
                 pass
 
-    def _th_audio_send(self, sock: zmq.Socket):
+    def _th_audio_zmq_recv(self, sock: zmq.Socket):
+        """Lightweight thread: polls ZMQ SUB socket and queues audio frames for output callback."""
         if not _AUDIO_OK or sys.platform == "win32":
             return
-        cfg = self.cfg["client"]["audio"]
-        try:
-            p = pyaudio.PyAudio()
-        except Exception:
-            return
-        try:
-            stream = p.open(
-                format=pyaudio.paInt16, channels=cfg["channels"],
-                rate=cfg["rate"], input=True,
-                frames_per_buffer=cfg["chunk"],
-            )
-        except Exception:
-            p.terminate()
-            return
-        meta = json.dumps({
-            "v": 1, "type": "audio",
-            "room": self.room, "sender_id": self.client_id,
-        }).encode()
-        while not self._stop.is_set():
-            try:
-                pcm = stream.read(cfg["chunk"], exception_on_overflow=False)
-                if not self.muted:
-                    sock.send_multipart([meta, pcm], flags=zmq.NOBLOCK)
-            except Exception:
-                pass
-        stream.stop_stream(); stream.close(); p.terminate()
-
-    def _th_audio_recv(self, sock: zmq.Socket):
-        if not _AUDIO_OK or sys.platform == "win32":
-            return
-        cfg = self.cfg["client"]["audio"]
-        try:
-            p = pyaudio.PyAudio()
-        except Exception:
-            return
-        try:
-            stream = p.open(
-                format=pyaudio.paInt16, channels=cfg["channels"],
-                rate=cfg["rate"], output=True,
-            )
-        except Exception:
-            p.terminate()
-            return
+        
         poller = zmq.Poller()
         poller.register(sock, zmq.POLLIN)
+        
         while not self._stop.is_set():
             evts = dict(poller.poll(timeout=500))
             if sock not in evts:
                 continue
-            frames = sock.recv_multipart()
-            if len(frames) < 3:
-                continue
+            
             try:
-                meta = json.loads(frames[1])
-            except Exception:
-                continue
-            if meta.get("sender_id") == self.client_id:
-                continue
-            if self.speaker_on:
+                frames = sock.recv_multipart()
+                if len(frames) < 3:
+                    continue
+                
+                # Parse metadata
                 try:
-                    stream.write(frames[2])
+                    meta = json.loads(frames[1])
                 except Exception:
-                    pass
-        stream.stop_stream(); stream.close(); p.terminate()
+                    continue
+                
+                # Ignore own audio
+                if meta.get("sender_id") == self.client_id:
+                   continue
+                
+                # Queue the audio frame (frames[2] is the PCM data)
+                # Use non-blocking put to avoid starving the audio callback
+                try:
+                    self.recv_queue.put_nowait(frames[2])
+                except queue.Full:
+                    # Queue overflow; drop oldest frame to make room
+                    try:
+                        self.recv_queue.get_nowait()
+                        self.recv_queue.put_nowait(frames[2])
+                    except Exception:
+                        pass
+            
+            except Exception:
+                pass
 
     def _th_video_send(self, sock: zmq.Socket):
         if not _VIDEO_OK or self._video_qos is None:
