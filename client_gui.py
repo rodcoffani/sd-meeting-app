@@ -166,6 +166,8 @@ class ConferenceApp:
     # Dimensões dos painéis de vídeo
     REM_W, REM_H = 640, 400   # vídeo remoto principal
     SELF_W, SELF_H = 200, 150  # self-preview
+    REM_TILE_W, REM_TILE_H = 308, 180
+    REM_TILE_COLS = 2
 
     def __init__(self):
         self.cfg       = load_config()
@@ -173,6 +175,8 @@ class ConferenceApp:
         self.username  = None
         self.room      = None
         self.broker    = None
+        self._participant_names: dict[str, str] = {}
+        self._video_panels: dict[str, dict[str, object]] = {}
 
         # Estado dos controles
         self.muted        = False
@@ -345,16 +349,21 @@ class ConferenceApp:
         main.pack(fill="both", expand=True)
 
         # Coluna esquerda: vídeo
+        gallery_width = self.REM_TILE_W * self.REM_TILE_COLS + 24
         left = tk.Frame(main, bg=C_BG)
+        left.configure(width=gallery_width)
+        left.pack_propagate(False)
         left.pack(side="left", fill="both", padx=6, pady=6)
 
-        self._video_remote = VideoPanel(left, self.REM_W, self.REM_H,
-                                        label="Vídeo remoto")
-        self._video_remote.pack()
+        tk.Label(left, text="Vídeos remotos", font=FONT_BOLD,
+             fg=C_TEXT, bg=C_BG).pack(anchor="w", pady=(0, 4))
+
+        self._video_gallery = tk.Frame(left, bg=C_BG, width=gallery_width)
+        self._video_gallery.pack(fill="x")
 
         self._video_self = VideoPanel(left, self.SELF_W, self.SELF_H,
                                       label=f"Você ({self.username})")
-        self._video_self.pack(pady=(4, 0))
+        self._video_self.pack(pady=(8, 0))
 
         # Coluna direita: membros + chat
         right = tk.Frame(main, bg=C_BG)
@@ -486,6 +495,7 @@ class ConferenceApp:
             self._stop.set()
             self._network_session.stop()
             self._cleanup_audio()
+            self._clear_video_panels()
             self._conf_frame.destroy()
             self._build_login()
             self.root.geometry("420x340")
@@ -493,6 +503,8 @@ class ConferenceApp:
             self.broker    = None
             self.username  = None
             self.room      = None
+            self._participant_names = {}
+            self._video_panels = {}
             self._network_session = GUIClientSession(self.cfg, self.client_id,
                                                      self._gui_q, self._stop)
 
@@ -502,6 +514,7 @@ class ConferenceApp:
         if self._network_session:
             self._network_session.stop()
         self._cleanup_audio()
+        self._clear_video_panels()
         self.root.destroy()
 
     # ------------------------------------------------------------------
@@ -518,13 +531,15 @@ class ConferenceApp:
                                       item["ts"], is_me=False)
                 elif t == "presence":
                     self._update_members(item["members"])
-                elif t == "video_remote":
-                    self._video_remote.show_frame(item["jpeg"])
-                    if self._network_session and self._network_session._video_qos:
-                        self._quality_lbl.config(
-                            text=f"Q:{int(self._network_session._video_qos.quality)}% "
-                                 f"{int(self._network_session._video_qos.fps)}fps"
-                        )
+                    self._sync_video_panels(item["members"])
+                elif t in ("video_participant", "video_remote"):
+                    sender_id = item.get("sender_id", "")
+                    if sender_id and sender_id != self.client_id:
+                        username = self._participant_names.get(sender_id) or sender_id[:8]
+                        panel = self._ensure_video_panel(sender_id, username)
+                        panel["name"].config(text=username)
+                        panel["video"].show_frame(item["jpeg"])
+                        self._update_video_status()
                 elif t == "video_self":
                     if self.camera_on:
                         self._video_self.show_camera_frame(item["frame"])
@@ -534,7 +549,7 @@ class ConferenceApp:
                 elif t == "reconnecting":
                     self._status_lbl.config(text="⚠ Reconectando...",
                                             fg=C_ACCENT)
-                    self._video_remote.show_placeholder("Reconectando...")
+                    self._clear_video_panels()
                     self._append_sys("Broker desconectado. Reconectando...")
                 elif t == "reconnected":
                     self._status_lbl.config(text="● Conectado", fg=C_GREEN)
@@ -574,6 +589,84 @@ class ConferenceApp:
         for cid, uname in members.items():
             marker = " (você)" if cid == self.client_id else ""
             self._members_list.insert("end", f"  ● {uname}{marker}")
+
+    def _ensure_video_panel(self, sender_id: str, username: str):
+        panel = self._video_panels.get(sender_id)
+        if panel:
+            return panel
+
+        container = tk.Frame(
+            self._video_gallery,
+            bg=C_PANEL,
+            highlightbackground=C_BORDER,
+            highlightthickness=1,
+        )
+        name_label = tk.Label(container, text=username, font=FONT_SMALL,
+                               fg=C_TEXT, bg=C_PANEL)
+        name_label.pack(anchor="w", padx=4, pady=(4, 0))
+
+        video_panel = VideoPanel(container, self.REM_TILE_W, self.REM_TILE_H)
+        video_panel.pack(padx=4, pady=4)
+
+        panel = {"container": container, "name": name_label, "video": video_panel}
+        self._video_panels[sender_id] = panel
+        self._reflow_video_panels()
+        return panel
+
+    def _clear_video_panels(self):
+        for panel in self._video_panels.values():
+            try:
+                panel["container"].destroy()
+            except Exception:
+                pass
+        self._video_panels.clear()
+        self._update_video_status()
+
+    def _sync_video_panels(self, members: dict):
+        self._participant_names = {
+            cid: uname for cid, uname in members.items() if cid != self.client_id
+        }
+        active_ids = set(self._participant_names)
+
+        for sender_id in list(self._video_panels):
+            if sender_id not in active_ids:
+                try:
+                    self._video_panels[sender_id]["container"].destroy()
+                except Exception:
+                    pass
+                self._video_panels.pop(sender_id, None)
+
+        for sender_id, username in self._participant_names.items():
+            panel = self._ensure_video_panel(sender_id, username)
+            panel["name"].config(text=username)
+
+        self._reflow_video_panels()
+        self._update_video_status()
+
+    def _reflow_video_panels(self):
+        if not hasattr(self, "_video_gallery"):
+            return
+        panels = sorted(
+            self._video_panels.items(),
+            key=lambda item: self._participant_names.get(item[0], item[0]).lower(),
+        )
+        for widget in self._video_gallery.winfo_children():
+            widget.grid_forget()
+
+        for index, (_, panel) in enumerate(panels):
+            row = index // self.REM_TILE_COLS
+            col = index % self.REM_TILE_COLS
+            panel["container"].grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+
+        for col in range(self.REM_TILE_COLS):
+            self._video_gallery.grid_columnconfigure(col, weight=1)
+        for row in range((len(panels) + self.REM_TILE_COLS - 1) // self.REM_TILE_COLS):
+            self._video_gallery.grid_rowconfigure(row, weight=1)
+
+    def _update_video_status(self):
+        if hasattr(self, "_quality_lbl"):
+            count = len(self._video_panels)
+            self._quality_lbl.config(text=f"Vídeos: {count}")
 
     def _set_status(self, msg: str, color: str = C_GREEN):
         if hasattr(self, "_status_lbl"):

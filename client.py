@@ -554,7 +554,11 @@ class GUIClientSession:
                 continue
             if meta.get("sender_id") == self.client_id:
                 continue
-            self._gui_q.put({"type": "video_remote", "jpeg": frames[2]})
+            self._gui_q.put({
+                "type": "video_participant",
+                "sender_id": meta.get("sender_id", ""),
+                "jpeg": frames[2],
+            })
             frame_count += 1
             if frame_count % 30 == 0 and self._video_qos:
                 self._video_qos.recover()
