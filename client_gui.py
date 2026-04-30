@@ -654,6 +654,12 @@ class ConferenceApp:
             except queue.Empty:
                 out_data = b'\x00' * len(in_data)
         else:
+            # Drain the queue while speaker is off to avoid latency when turning back on
+            try:
+                while True:
+                    self.recv_queue.get_nowait()
+            except queue.Empty:
+                pass
             out_data = b'\x00' * len(in_data)
         
         return (out_data, pyaudio.paContinue)
