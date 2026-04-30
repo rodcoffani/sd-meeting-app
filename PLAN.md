@@ -100,63 +100,75 @@ Build a GUI for login and room management using **tkinter**
 
 ## Step 1: Dynamic Architecture with Multiple Brokers
 
-### 1.1 Goal
+### 1.1 Single Broker (CURRENT)
 
-Implement multiple brokers (none room-specific) that communicate via ZeroMQ, with brokers selected via round-robin
+The broker handles all rooms and client connections using fixed ports.
 
-### 1.2 Approach
+### 1.2 Current Implementation
 
-- **Multiple equal brokers** - any broker can handle any room or individual call
-- **Registry broker** - tracks available brokers and rooms (can be one of the brokers)
-- **Router/Dealer** pattern for client control messages
-- **PUB/SUB** for media distribution
-- Room assigned to broker via round-robin when created
+- Fixed ports from config.yaml
+- PUB/SUB for text, audio, video relay
+- Single broker handles all rooms
 
-### 1.3 Architecture
+### 1.3 Port Configuration
 
-```txt
-┌─────────────────────────────────────────────────┐
-│                Registry Broker                  │
-│  ┌───────────────────────────────────────────┐  │
-│  │  Broker Registry                          │  │
-│  │  - broker_1: {addr, load, rooms}          │  │
-│  │  - broker_2: {addr, load, rooms}          │  │
-│  └───────────────────────────────────────────┘  │
-│  ┌───────────────────────────────────────────┐  │
-│  │  Room Registry                            │  │
-│  │  - room_001: {broker_1, [user1, user2]}   │  │
-│  │  - room_002: {broker_2, [user3]}          │  │
-│  │  - call_1:1: {broker_1, [user1, user4]}   │  │
-│  └───────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
-         ▲                        ▲
-         │                        │
-┌────────┴────────┐    ┌────────┴────────┐
-│   Broker 1      │◄──►│   Broker 2      │
-│  (handles rooms │    │  (handles rooms │
-│   assigned to   │    │   assigned to   │
-│   it)           │    │   it)           │
-└─────────────────┘    └─────────────────┘
-         │                        │
-┌────────┴────────┐    ┌────────┴────────┐
-│   Client 1      │    │   Client 2      │
-│   (user1)       │    │   (user3)       │
-└─────────────────┘    └─────────────────┘
+```yaml
+broker:
+  text:
+    pub_port: 5551
+    sub_port: 5552
+  audio:
+    pub_port: 5553
+    sub_port: 5554
+  video:
+    pub_port: 5555
+    sub_port: 5556
 ```
 
-### Implementation Details
+### 1.4 Starting the Broker
 
-- All brokers equal, none room-specific
-- Registry maintains broker list and room-to-broker mapping
-- Inter-broker communication via ZeroMQ (PUB/SUB or Router) for state sync
-- Message types:
-  - `BROKER_REGISTER` - Broker registers with registry
-  - `ROOM_CREATE` - Request room creation (registry assigns broker)
-  - `JOIN_ROOM` - Join existing room
+```bash
+./run_broker.sh
+```
+
+## TODO - Multiple Brokers
+
+Future implementation with multiple brokers:
+
+- **Port range** - brokers auto-assign ports from range (5551-5600)
+- **Registry broker** - tracks available brokers and rooms
+- **Worker brokers** - register with registry on startup
+- **Round-robin or ping?** - clients select broker (the one with lowest load or latency?)
+- **Inter-broker sync** - control channel for state sharing
+
+| Task                | Description                       |
+| ------------------- | --------------------------------- |
+| Port allocation     | Auto-assign 8 ports per broker    |
+| Registry mode       | Track active brokers and rooms    |
+| Worker registration | Workers register with registry    |
+| Broker discovery    | Client finds broker via broadcast |
+| Failover            | Reconnect on broker failure       |
+
+### TODO: Port Allocation
+
+Each broker gets 8 consecutive ports:
+
+| Broker | Control | Text   | Audio  | Video  |
+| ------ | ------- | ------ | ------ | ------ |
+| 1      | 5551-2  | 5553-4 | 5555-6 | 5557-8 |
+| 2      | 5559-60 | 5561-2 | 5563-4 | 5565-6 |
+| ...    | ...     | ...    | ...    | ...    |
+
+### TODO: Broker Startup
+
+```bash
+./broker.py --registry  # Start as registry
+./broker.py             # Start as worker
+```
 
 ---
 
-## Step 2: Service Discovery with Broadcast
+## Step 2: Service Discovery and Client Connection
 
 ### 2.1 Goal
 
@@ -166,7 +178,7 @@ Clients discover available brokers via broadcast and are assigned via round-robi
 
 - Use **broadcast discovery**: Client broadcasts on a well-known port
 - Registry maintains list of available brokers with their load
-- Client receives broker list from registry, selects via round-robin
+- Client receives broker list from registry (selects via round-robin or based on latency?)
 
 ### 2.3 Process
 
@@ -180,7 +192,7 @@ Clients discover available brokers via broadcast and are assigned via round-robi
 - Maintains `{broker_id: {addr, load, status}}` - available brokers
 - Maintains `{room_id: {broker_id, users: [user_ids]}}` - active rooms
 - Maintains `{user_id: broker_id}` - user-to-broker mapping
-- On room create → assign broker with lowest load (round-robin)
+- On room create → assign broker (with lowest load or ping)
 - On room join → notify broker handling that room
 
 ### 2.5 Message Types
@@ -377,20 +389,12 @@ All settings managed via `config.yaml`:
 
 ```yaml
 broker:
-  discovery:
-    broadcast_port: 5550
-  registry:
-    pub_port: 5551
-    sub_port: 5552
-  text:
-    pub_port: 5553
-    sub_port: 5554
-  audio:
-    pub_port: 5555
-    sub_port: 5556
-  video:
-    pub_port: 5557
-    sub_port: 5558
+  # Port range for multiple brokers (8 ports per broker)
+  port_range:
+    start: 5551
+    end: 5600
+  # Broker identification
+  brokers_count: 1 # number of active brokers (updated at runtime)
 
 client:
   audio:
@@ -478,7 +482,7 @@ VIDEO:<seq>:<timestamp>:<frame_data>
 1. User enters username
 2. Client broadcasts to discover brokers
 3. Registry responds with broker list
-4. Client selects broker via round-robin
+4. Client selects broker (via round-robin or ping)
 5. Client connects, creates/joins room
 6. Media flows via broker's pub/sub channels
 7. User can create/join rooms or call individual users
