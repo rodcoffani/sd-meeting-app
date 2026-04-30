@@ -2,399 +2,298 @@
 
 ## Project Overview
 
-A distributed video conferencing application supporting video, audio, and text communication.
-Multiple users can participate in individual calls or group rooms.
-Built in Python 3 with ZeroMQ for async communication.
+A distributed video conferencing application supporting video, audio, and text communication across multiple rooms managed by a broker mesh. Built in Python 3 with ZeroMQ for async message routing and Python threading for media capture/playback.
 
 ---
 
-## Step 0: User Interface
+## Architecture Overview
 
-### 0.1 Goal
-
-Build a GUI for login and room management using **tkinter**
-
-### 0.2 Login Screen
-
-- Username input field
-- "Connect" button
-
-### 0.3 Main Screen (Before Call)
-
-```txt
-┌─────────────────────────────────────────────────────────────┐
-│  SD Meeting App                        [User: username]     │
-├─────────────────────────────────────────────────────────────┤
-│                     VIDEO PREVIEW                           │
-│            ┌───────────────────────────────────┐            │
-│            │                                   │            │
-│            │       (local camera feed)         │            │
-│            │                                   │            │
-│            └───────────────────────────────────┘            │
-├─────────────────────────────────────────────────────────────┤
-│                    ONLINE USERS          ROOMS              │
-│   ┌────────────────────┐         ┌────────────────────┐     │
-│   │ User 1             │         │ room_001           │     │
-│   │ User 2             │         │ room_002           │     │
-│   │ User 3             │         │ meeting            │     │
-│   └────────────────────┘         └────────────────────┘     │
-├─────────────────────────────────────────────────────────────┤
-│ Connect to: [________________] [Join] [Create room]         │
-└─────────────────────────────────────────────────────────────┘
+```
+┌──────────────────────────────────────────────────────┐
+│                      Registry                        │  ← Service Discovery (REQ/REP)
+│                  (porta 5500)                        │
+└──────────────┬───────────────────────────────────────┘
+               │ register / heartbeat / query_room
+       ┌───────┴────────┐
+       ▼                ▼
+┌─────────────┐   ┌─────────────┐       Inter-broker
+│  Broker-0   │◄─►│  Broker-1   │  ←  ROUTER/DEALER + heartbeat PUB/SUB
+│  Salas A-D  │   │  Salas E-H  │
+└──────┬──────┘   └──────┬──────┘
+       │ PULL/PUB        │ PULL/PUB
+  ┌────┴────┐       ┌────┴────┐
+  │  alice  │       │  carol  │   ← PUSH/SUB/DEALER (texto, áudio, vídeo)
+  │   bob   │       │         │
+  └─────────┘       └─────────┘
 ```
 
-### 0.4 Call Screen (Replaces Main During Call)
+### Key Components
 
-```txt
-┌──────────────────────────────────────────────────────────────┐
-│  SD Meeting App - room_001                 [Leave]           │
-├──────────────────────────────────────────────────────────────┤
-│                     VIDEO AREA                               │
-│  ┌──────────────────────────┐  ┌─────────────────────────┐   │
-│  │                          │  │                         │   │
-│  │    (remote video 1)      │  │    (remote video 2)     │   │
-│  │                          │  │                         │   │
-│  └──────────────────────────┘  └─────────────────────────┘   │
-├──────────────────────────────────────────────────────────────┤
-│ CHAT                                                         │
-│ ┌─────────────────────────────────────────────────────────┐  │
-│ │ User1: Hello                                            │  │
-│ │ User2: Hi!                                              │  │
-│ └─────────────────────────────────────────────────────────┘  │
-│ Text: [____________________________________________] [Send]  │
-└──────────────────────────────────────────────────────────────┘
-```
+- **Registry**: Service discovery; maintains broker registry and room-to-broker mappings; reassigns orphaned rooms to live brokers
+- **Brokers**: Distributed mesh; each manages rooms and client connections; forwards media within rooms; exchanges heartbeats and room transfers with peers
+- **Clients**: Connect via Registry discovery; send/receive media via Broker's PUB/SUB; send control messages via DEALER/ROUTER
+- **Heartbeat System**: Client→Broker (liveness), Broker↔Registry (registration), Broker↔Broker (peer health and room reassignment)
 
-### 0.5 Interface Requirements
+### ZeroMQ Patterns Used
 
-| Component              | Description                                        |
-| ---------------------- | -------------------------------------------------- |
-| **Video Preview**      | Shows local camera (before/during call)            |
-| **Online Users**       | Left column - displays logged-in users             |
-| **Rooms**              | Right column - displays available rooms            |
-| **Input field**        | Enter room name or username to connect to          |
-| **Join button**        | Join existing room or start 1:1 call               |
-| **Create room button** | Create new room (name must be unique)              |
-| **Leave button**       | Exit current room/call (shown during call)         |
-| **Chat area**          | Text messages (replaces participants list in call) |
-| **Send button**        | Send text message in chat                          |
+| Padrão | Sockets | Propósito |
+|---|---|---|
+| **PUSH → PULL** | Cliente → Broker | Envio de mídia (texto, áudio, vídeo) com backpressure |
+| **PUB → SUB** | Broker → Clientes | Distribuição por sala (topic filter `"text:A"`, `"audio:F"`) |
+| **DEALER ↔ ROUTER** | Cliente ↔ Broker | Controle: login, ACK de texto, presença, heartbeat, leave |
+| **DEALER → ROUTER** | Broker → Broker | Relay inter-broker (mensagens para salas de outros brokers) |
+| **PUB → SUB** | Broker → Broker | Heartbeat entre brokers (topic `"hb"`) |
+| **REQ → REP** | Brokers/Clientes → Registry | Service discovery, broker registration, room reassignment |
 
-### 0.6 Key Points
+### QoS Strategy
 
-- **No participants list** - replaced by chat area during call
-- **No polling** - participants know they're connected by video/audio
-- **Same window** - video and chat together
-- **Room names must be unique** - if duplicate, show error
-- **Leave button** - available during call and from main screen
-
-### 0.7 Flow
-
-1. Login → enter username → connect
-2. Main screen → shows video preview + online users + rooms
-3. Enter target in text field
-4. Click **Join** or **Create room**
-5. Call screen replaces main screen
-6. Click **Leave** to exit call
+| Canal | Estratégia | Implementação |
+|---|---|---|
+| **Texto** | Confiabilidade | ACK do broker + reenvio automático (até 5 tentativas, intervalo 200 ms) |
+| **Áudio** | Baixa latência | Buffer FIFO com descarte de frames antigos (drop-oldest) |
+| **Vídeo** | Real-time adaptativo | Buffer com adaptação: reduz FPS (15→5) e compressão JPEG (70%→30%) sob alta carga |
 
 ---
 
-## Step 1: Dynamic Architecture with Multiple Brokers
+## Implementation Details
 
-### 1.1 Single Broker (CURRENT)
+### Threading Model
 
-The broker handles all rooms and client connections using fixed ports.
+Each client session (`GUIClientSession`) spawns independent threads for concurrency:
 
-### 1.2 Current Implementation
+```
+Main Application Thread
+├── _th_text_send()       → Enqueue outbound text
+├── _th_text_recv()       → Dequeue inbound text → GUI
+├── _th_audio_send()      → Read mic → Enqueue → Broker
+├── _th_audio_recv()      → Dequeue → Speaker (via PyAudio callback)
+├── _th_video_send()      → Read camera → Enqueue → Broker
+├── _th_video_recv()      → Dequeue → GUI render (emits video_participant event)
+├── _th_client_hb()       → Periodic heartbeat to broker (3s interval)
+└── _th_hb_monitor()      → Detect heartbeat loss → trigger reconnect
+```
 
-- Fixed ports from config.yaml
-- PUB/SUB for text, audio, video relay
-- Single broker handles all rooms
+**Key distinction**: `_stop` (app lifetime) vs `_session_stop` (network session lifetime) allows clean reconnects without restarting the GUI.
 
-### 1.3 Port Configuration
+### Liveness & Failover
+
+**Client Liveness**:
+- `_th_client_hb()` sends periodic heartbeat (3s interval) to broker
+- Broker updates `last_seen` timestamp for each member
+- Broker's background thread prunes stale members (timeout: 6s)
+- On stale member removal, presence is republished
+
+**Broker Failure Detection**:
+- `_th_hb_monitor()` detects consecutive heartbeat misses from broker
+- On broker loss, signals `"reconnecting"` event to GUI
+- GUI's `_reconnect_worker()` orchestrates session restart:
+  1. Stops old `GUIClientSession`
+  2. Cleans up PyAudio stream and media resources
+  3. **Preserves camera state** (`camera_on` flag)
+  4. Rediscovers broker via Registry
+  5. Creates new `GUIClientSession` with preserved camera state
+  6. Restarts audio/video media threads
+
+**Room Transfer on Broker Death**:
+- When Registry detects dead broker (via heartbeat timeout), it reassigns orphaned rooms
+- Registry calls `_pick_broker_for_room()` to select live broker
+- Clients in reassigned rooms are unaffected (they reconnect to new broker via Registry discovery)
+
+### Media Lifecycle
+
+**Camera Pause/Resume**:
+- `_camera_enabled` threading.Event controls capture
+- When disabled: `_th_video_send()` releases `cv2.VideoCapture` (frees hardware resource)
+- When enabled: `_th_video_send()` reopens `cv2.VideoCapture`
+- State persists across reconnects: new session inherits `camera_on` state via `set_camera_enabled(bool)`
+
+**Multi-Participant Display**:
+- `_video_panels: dict[sender_id → panel_dict]` maintains per-participant tiles
+- `_th_video_recv()` emits `video_participant` events with `sender_id` preserved
+- GUI's `_sync_video_panels(members)` creates/destroys tiles dynamically
+- Gallery layout: 2 columns, scrollable, tiles reflow on join/leave
+
+**Media Stop on Disconnect, Restart on Reconnect**:
+- Broker loss triggers reconnect worker
+- Worker calls `_cleanup_audio()`: stops PyAudio stream, closes backend
+- Old session is fully stopped; media queues are cleared
+- New session's `start()` method calls `_start_audio_stream()` to reopen PyAudio
+- Video capture restarts with preserved `camera_on` state
+
+### Recent Fixes & Enhancements
+
+1. **Audio Queue Draining on Speaker Toggle**: `_audio_callback()` now drains recv queue when `speaker_on=False`, preventing audio accumulation
+2. **Camera Pause/Resume with Resource Release**: Added `_camera_enabled` event; camera capture released when disabled, reopened when enabled
+3. **Stale Member Pruning**: Client heartbeat thread + broker-side stale-member pruning removes users from presence after timeout
+4. **Multi-Participant Video Grid**: Replaced single `_video_remote` with participant-keyed tile dictionary; sender_id preserved through network and GUI layers
+5. **Broker Transfer/Failover**: Reconnect worker, Registry room reassignment, inter-broker messaging for seamless room transfer
+6. **Media Lifecycle Management**: Media stops on disconnect, restarts only after successful reconnect; camera state preserved across sessions
+
+---
+
+## Broker Architecture & Operations
+
+### Broker Registration & Discovery
+
+**Startup sequence:**
+1. Broker starts with index (0, 1, 2, ...) and optional host (default: 127.0.0.1)
+2. Computes own ports using formula: `base_port + broker_index * port_stride`
+3. Assigns rooms based on index: `rooms[index * rooms_per_broker : (index + 1) * rooms_per_broker]`
+4. Registers with Registry via REQ/REP, providing broker_id, host, ports, rooms
+5. Launches independent threads:
+   - `_registry_hb_thread()`: Sends heartbeat to Registry every 2.0 seconds
+   - `_discovery_thread()`: Queries Registry every 5 seconds for new peer brokers
+   - Main loop: Polls all media sockets and inter-broker sockets
+
+**Example setup (port_stride = 100):**
+- Broker-0 (idx=0): Rooms A–D, text ports 5551–5552, audio 5553–5554, video 5555–5556, control 5560, inter_broker 5600, heartbeat 5700
+- Broker-1 (idx=1): Rooms E–H, text ports 5651–5652, audio 5653–5654, video 5655–5656, control 5660, inter_broker 5610, heartbeat 5710
+- Broker-2 (idx=2): Rooms I–K, text ports 5751–5752, audio 5753–5754, video 5755–5756, control 5760, inter_broker 5620, heartbeat 5720
+
+### Inter-Broker Mesh
+
+**Peer discovery:**
+- `_discovery_thread()` queries Registry for list of active brokers
+- New peers are enqueued via `_new_peers_q`
+- Main loop dequeues and connects via `_connect_peer()`:
+  - Creates DEALER socket pointing to peer's inter_broker port
+  - Subscribes to peer's heartbeat PUB on heartbeat port
+  - Stores peer info (broker_id, host, ports, last_hb timestamp)
+
+**Message relay:**
+- `_forward_to_peer()` sends media to peers that own the target room
+- Uses DEALER→ROUTER pattern (base64-encoded payload, relay metadata with hop counter)
+- Single-hop only (hop=1 → dropped, prevents loops)
+- Returns success/failure to allow fallback to local broadcast
+
+**Heartbeat between peers:**
+- Each broker publishes `{"broker_id": self.broker_id}` on heartbeat PUB port every 2s
+- Peer subscribers detect death after 6s without heartbeat (implicit via ENODEV on socket poll)
+- Dead peer is removed from `self.peers` dict on next main loop iteration
+
+### Room & Member Management
+
+**RoomManager (thread-safe):**
+- Maintains `{room: {client_id: {username, last_seen}}}` with threading.Lock
+- `join(room, client_id, username)`: Adds client, sets last_seen to now
+- `leave(room, client_id)`: Removes client from room
+- `heartbeat(room, client_id)`: Updates last_seen timestamp
+- `prune_stale(timeout)`: Returns list of rooms that lost members; removes all with last_seen > timeout
+
+**Presence broadcast:**
+- On login/leave/heartbeat timeout, broker publishes presence message to `text:{room}` topic
+- Payload: `{"type": "presence", "room": room, "members": {client_id: username, ...}}`
+- All clients subscribed to `text:{room}` receive and render in UI
+
+### Message Handlers (in main loop via poller)
+
+| Handler | Triggers on | Response |
+|---|---|---|
+| `_on_text()` | PULL from clients | ACK via ROUTER + broadcast to room |
+| `_on_audio()` | PULL from clients | Broadcast to room (no ACK) |
+| `_on_video()` | PULL from clients | Broadcast to room (no ACK) |
+| `_on_control()` | ROUTER (login/leave/hb) | Sends ACK, updates room members, publishes presence |
+| `_on_inter_broker()` | DEALER (relay from peer) | Broadcasts to local subscribers (if hop=0) |
+| `_on_heartbeat()` | SUB (from peers) | Updates peer's last_hb timestamp |
+
+---
+
+## Client Session Lifecycle
+
+### GUIClientSession (client.py & client_gui.py)
+
+**Initialization:**
+1. GUI creates `GUIClientSession(cfg, client_id, gui_q, stop_event)`
+2. Session stores configuration, client_id, and GUI queue
+3. Creates thread-safe queues for media (text, audio, video)
+4. Initializes QoS handlers: `TextQoS` (ACK + retry), `VideoQoS` (FPS/quality adaptation)
+
+**Broker discovery:**
+1. CLI calls `discover_broker(max_retries=15, delay=1.0)` (GUI calls similarly in background)
+2. Creates temporary REQ socket to Registry
+3. Sends: `{"type": "query_room", "room": room_name}`
+4. Registry responds: `{"status": "ok", "broker": {broker_id, host, ports, rooms}}`
+5. Stores broker info; returns True on success
+
+**Media sockets:**
+- PUSH (text): Sends text to `broker.pull_port`
+- PUSH (audio): Sends audio to `broker.pull_port`
+- PUSH (video): Sends video to `broker.pull_port`
+- SUB (text): Subscribes to `text:{room}`
+- SUB (audio): Subscribes to `audio:{room}`
+- SUB (video): Subscribes to `video:{room}`
+- DEALER (control): Sends login/leave/heartbeat to `broker.control_port`; receives ACK
+
+**Thread model:**
+```
+GUIClientSession.start(gui_q) spawns:
+├── _th_text_send()       → TextQoS.get_next() → PUSH
+├── _th_text_recv()       → SUB → TextQoS.ack() → gui_q.put("text_msg" event)
+├── _th_audio_send()      → mic (PyAudio) → PUSH
+├── _th_audio_recv()      → SUB → gui_q.put("audio_frame" event)
+├── _th_video_send()      → camera (OpenCV) → VideoQoS.encode() → PUSH
+├── _th_video_recv()      → SUB → gui_q.put("video_participant" event, {sender_id, frame})
+├── _th_client_hb()       → DEALER send {"type": "hb", "sender_id": self.client_id} every 3s
+└── _th_hb_monitor()      → Subscribe to broker heartbeat; detect loss → gui_q.put("reconnecting" event)
+```
+
+**Session stop vs app stop:**
+- `_session_stop` event: Used by threads within GUIClientSession; set during reconnect
+- `_stop` event: Used by ConferenceApp; set only on app close
+- Reconnect sets `_session_stop`, waits for threads to exit, creates fresh GUIClientSession, clears `_session_stop`, restarts threads
+
+### Reconnection Flow (ConferenceApp._reconnect_worker)
+
+**Trigger:** `_th_hb_monitor()` detects broker heartbeat loss (no message for 6+ seconds)
+
+**Sequence:**
+1. Signal `"reconnecting"` event to GUI
+2. Set `_session_stop` event → all threads check this and exit
+3. Call `_cleanup_audio()`: Stops PyAudio stream, closes context
+4. Save current camera state: `camera_state = self.camera_on`
+5. Destroy old GUIClientSession
+6. Call `discover_broker()` with retry loop (discovery thread re-queries Registry)
+7. Create new GUIClientSession with same credentials
+8. Call `set_camera_enabled(camera_state)` to restore camera state
+9. Call `start()` → spawns fresh media threads
+10. Call `_start_audio_stream()` → reopens PyAudio and creates callback
+11. Clear `_session_stop` → signals threads to run normally
+
+**Key invariant:** During reconnect, GUI remains responsive (separate `_session_stop` from `_stop`). All old sockets are closed before new ones created.
+
+---
+
+## Configuration & Runtime Parameters
+
+**config.yaml — Actual values:**
 
 ```yaml
 broker:
+  # Port assignment formula: base_port + broker_index * port_stride
   text:
-    pub_port: 5551
-    sub_port: 5552
+    pub_port: 5551      # broker PUB (clients SUB on text:<room>)
+    pull_port: 5552     # clients PUSH media
   audio:
     pub_port: 5553
-    sub_port: 5554
+    pull_port: 5554
   video:
     pub_port: 5555
-    sub_port: 5556
-```
-
-### 1.4 Starting the Broker
-
-```bash
-./run_broker.sh
-```
-
-## TODO - Multiple Brokers
-
-Future implementation with multiple brokers:
-
-- **Port range** - brokers auto-assign ports from range (5551-5600)
-- **Registry broker** - tracks available brokers and rooms
-- **Worker brokers** - register with registry on startup
-- **Round-robin or ping?** - clients select broker (the one with lowest load or latency?)
-- **Inter-broker sync** - control channel for state sharing
-
-| Task                | Description                       |
-| ------------------- | --------------------------------- |
-| Port allocation     | Auto-assign 8 ports per broker    |
-| Registry mode       | Track active brokers and rooms    |
-| Worker registration | Workers register with registry    |
-| Broker discovery    | Client finds broker via broadcast |
-| Failover            | Reconnect on broker failure       |
-
-### TODO: Port Allocation
-
-Each broker gets 8 consecutive ports:
-
-| Broker | Control | Text   | Audio  | Video  |
-| ------ | ------- | ------ | ------ | ------ |
-| 1      | 5551-2  | 5553-4 | 5555-6 | 5557-8 |
-| 2      | 5559-60 | 5561-2 | 5563-4 | 5565-6 |
-| ...    | ...     | ...    | ...    | ...    |
-
-### TODO: Broker Startup
-
-```bash
-./broker.py --registry  # Start as registry
-./broker.py             # Start as worker
-```
-
----
-
-## Step 2: Service Discovery and Client Connection
-
-### 2.1 Goal
-
-Clients discover available brokers via broadcast and are assigned via round-robin
-
-### 2.2 Approach
-
-- Use **broadcast discovery**: Client broadcasts on a well-known port
-- Registry maintains list of available brokers with their load
-- Client receives broker list from registry (selects via round-robin or based on latency?)
-
-### 2.3 Process
-
-1. Client broadcasts `DISCOVER_BROKER` message
-2. Registry responds with `BROKER_LIST` (list of available brokers)
-3. Client selects broker via round-robin from list
-4. Client connects to selected broker for room/media
-
-### 2.4 Registry State
-
-- Maintains `{broker_id: {addr, load, status}}` - available brokers
-- Maintains `{room_id: {broker_id, users: [user_ids]}}` - active rooms
-- Maintains `{user_id: broker_id}` - user-to-broker mapping
-- On room create → assign broker (with lowest load or ping)
-- On room join → notify broker handling that room
-
-### 2.5 Message Types
-
-- `DISCOVER_BROKER` - Client broadcasts to find broker
-- `BROKER_AVAILABLE` - Broker responds with address/ports
-- `LIST_ROOMS` - Request list of active rooms
-- `ROOM_INFO` - Response with room details
-
----
-
-## Step 3: Fault Tolerance with Heartbeat
-
-### 3.1 Goal
-
-Detect broker failures and reconnect
-
-### 3.2 Approach
-
-- Heartbeat via **REQ/REP** every **3 seconds**
-- Client pings broker; broker responds with `PONG`
-- If 3 consecutive pings fail → broker considered dead
-
-### 3.3 Implementation
-
-```python
-# Client side
-HEARTBEAT_INTERVAL = 3  # seconds
-MAX_MISSES = 3
-
-def heartbeat_thread(socket):
-    while True:
-        try:
-            socket.send_string("PING")
-            socket.recv_string(zmq.NOBLOCK)
-            consecutive_misses = 0
-        except:
-            consecutive_misses += 1
-            if consecutive_misses >= MAX_MISSES:
-                reconnect()
-        sleep(HEARTBEAT_INTERVAL)
-```
-
-### 3.4 Failover
-
-- On broker failure, client re-broadcasts to find new broker
-- Registry reassigns rooms from failed broker to available brokers
-- If client was in room, client rejoins via new broker
-
----
-
-## Step 4: QoS Implementation
-
-### 4.1 Goal
-
-Ensure quality per media type
-
-| Media | Requirement   | Implementation                           |
-| ----- | ------------- | ---------------------------------------- |
-| Text  | Reliability   | Retry + Acknowledgment                   |
-| Audio | Low latency   | Buffer with timestamps, drop late frames |
-| Video | Adaptive rate | Frame drop (skip every Nth frame)        |
-
-### 4.2 Text (Reliability)
-
-- Add sequence numbers to messages
-- Sender retries if no ACK within timeout
-- Receiver ACKs each message
-
-### 4.3 Audio (Buffer + Latency)
-
-```python
-# Buffer with timestamps
-audio_buffer = deque(maxlen=10)
-
-def play_audio(data):
-    recv_time = time.time()
-    # Sort by timestamp, play in order
-    audio_buffer.append((data.timestamp, data))
-    audio_buffer.sort()
-    play(audio_buffer[0])
-
-# Drop frames older than 100ms
-```
-
-### 4.4 Video (Adaptive Frame Drop)
-
-```python
-# Skip frames under high load
-frame_counter = 0
-drop_every_n = 1
-
-def should_drop_frame():
-    global drop_every_n
-    if load > threshold:
-        drop_every_n = 2  # drop every other frame
-    else:
-        drop_every_n = 1
-    return frame_counter % drop_every_n != 0
-```
-
----
-
-## Step 5: Async with Threading
-
-### 5.1 Goal
-
-Separate capture, send, receive, render into independent threads
-
-### 5.2 Thread Architecture
-
-```txt
-Main Thread (control)
-├── Text Threads
-│   ├── text_capture_thread  → input() → send
-│   └── text_render_thread   ← receive → print
-├── Audio Threads
-│   ├── audio_capture_thread → read mic → send
-│   └── audio_render_thread  ← receive → play speaker
-└── Video Threads
-    ├── video_capture_thread → read cam → send
-    └── video_render_thread   ← receive → display
-```
-
-### 5.3 Implementation
-
-```python
-threads = []
-
-# Start all threads
-threads.append(threading.Thread(target=text_capture, args=(ctx,)))
-threads.append(threading.Thread(target=text_render, args=(ctx,)))
-threads.append(threading.Thread(target=audio_capture, args=(ctx,)))
-threads.append(threading.Thread(target=audio_render, args=(ctx,)))
-threads.append(threading.Thread(target=video_capture, args=(ctx,)))
-threads.append(threading.Thread(target=video_render, args=(ctx,)))
-
-for t in threads:
-    t.start()
-```
-
-### 5.4 Thread-safe Queues
-
-```python
-from queue import Queue
-
-text_queue = Queue()
-audio_queue = Queue()
-video_queue = Queue()
-```
-
----
-
-## Step 6: Identity and Room Management
-
-### 6.1 Goal
-
-Minimal login (username only), show online users and existing rooms
-
-### 6.2 Login
-
-```python
-# Simple login on startup
-username = input("Enter username: ")
-socket.send_string(f"LOGIN:{username}")
-```
-
-### 6.3 Online Users
-
-- Broker maintains `{user_id: socket}`
-- On LOGIN → add to active users
-- On DISCONNECT → remove
-- `LIST_USERS` command returns all online users
-
-### 6.4 Room Commands
-
-- `CREATE_ROOM:<room_name>` - Create new room
-- `JOIN_ROOM:<room_name>` - Join existing room
-- `LEAVE_ROOM` - Leave current room
-- `LIST_ROOMS` - List available rooms
-
-### 6.5 Implementation in Broker
-
-```python
-rooms = {}  # {room_id: {users: [], broker_addr: str}}
-online_users = {}  # {user_id: socket}
-```
-
----
-
-## Configuration
-
-All settings managed via `config.yaml`:
-
-```yaml
-broker:
-  # Port range for multiple brokers (8 ports per broker)
-  port_range:
-    start: 5551
-    end: 5600
-  # Broker identification
-  brokers_count: 1 # number of active brokers (updated at runtime)
+    pull_port: 5556
+  control_port: 5560    # ROUTER (clients DEALER)
+  inter_broker_base_port: 5600   # DEALER relay to peers
+  heartbeat_base_port: 5700      # PUB/SUB heartbeat between brokers
+  port_stride: 100      # Broker N uses base + N * stride
+
+registry:
+  host: 127.0.0.1
+  port: 5500
+  heartbeat_timeout: 5.0   # Broker removed if no heartbeat within 5s
+
+cluster:
+  heartbeat_interval: 2.0  # Brokers send HB to registry every 2s
+  heartbeat_timeout: 5.0   # Peers considered dead after 5s without heartbeat
+  all_rooms: [A, B, C, D, E, F, G, H, I, J, K]
+  rooms_per_broker: 4
 
 client:
   audio:
@@ -405,96 +304,166 @@ client:
     device_index: 0
     frame_width: 640
     frame_height: 480
-  heartbeat:
-    interval: 3
-    max_misses: 3
 
 qos:
   text:
-    retry_timeout: 2
+    max_retry: 5
+    retry_interval: 0.2    # Recheck unsent messages every 0.2s
+    ack_timeout: 2.0       # Timeout for ACK from broker
   audio:
-    buffer_size: 10
-    max_latency_ms: 100
+    max_queue_depth: 10    # Max frames buffered (drop-oldest if exceeded)
   video:
-    frame_drop_threshold: 0.8
+    max_queue_depth: 3
+    base_fps: 15
+    min_fps: 5
+    jpeg_quality: 70
+    min_jpeg_quality: 30
 ```
+
+### Port Distribution (port_stride = 100)
+
+| Component | Broker-0 | Broker-1 | Broker-2 | Formula |
+|---|---|---|---|---|
+| Text PUB | 5551 | 5651 | 5751 | 5551 + idx×100 |
+| Text PULL | 5552 | 5652 | 5752 | 5552 + idx×100 |
+| Audio PUB | 5553 | 5653 | 5753 | 5553 + idx×100 |
+| Audio PULL | 5554 | 5654 | 5754 | 5554 + idx×100 |
+| Video PUB | 5555 | 5655 | 5755 | 5555 + idx×100 |
+| Video PULL | 5556 | 5656 | 5756 | 5556 + idx×100 |
+| Control ROUTER | 5560 | 5660 | 5760 | 5560 + idx×100 |
+| Inter-Broker DEALER | 5600 | 5610 | 5620 | 5600 + idx×10 |
+| Heartbeat PUB | 5700 | 5710 | 5720 | 5700 + idx×10 |
+| Registry REQ/REP | 5500 (fixed) |
 
 ---
 
 ## Message Protocol
 
-### Control Messages (Client ↔ Broker)
+### Control Messages (Client ↔ Broker via ROUTER/DEALER)
 
-```txt
-DISCOVER_BROKER -> BROKER_LIST
-LOGIN:<username> -> OK
-LIST_ROOMS -> room1,room2
-CREATE_ROOM:<room_id> -> OK:<broker_addr>
-JOIN_ROOM:<room_id> -> OK
-LEAVE_ROOM -> OK
-PING -> PONG
+```json
+// CLIENT → BROKER (via DEALER)
+{"type": "login", "username": "alice", "room": "A"}
+← BROKER (ACK via ROUTER): {"type": "login_ack", "room": "A", "members": {...}, "broker_id": "..."}
+
+{"type": "leave", "room": "A"}
+← ACK: {"type": "leave_ack", "room": "A"}
+
+{"type": "hb", "sender_id": "client-uuid", "room": "A"}
+← (no ACK; broker just updates last_seen)
 ```
 
-### Inter-Broker Messages (Broker ↔ Registry)
+### Media Messages (Multipart)
 
-```txt
-BROKER_REGISTER:<broker_id>:<addr> -> OK
-BROKER_HEARTBEAT -> OK
-ROOM_CREATE:<room_id> -> ASSIGN_BROKER:<broker_id>
-ROOM_JOIN:<room_id> -> OK
-ROOM_LEAVE:<room_id> -> OK
+**Text/Audio/Video structure (PUSH):**
+```
+Frame 0: {"v": 1, "type": "text|audio|video", "room": "A", "sender_id": "...", "seq": N, "msg_id": "...", ...}
+Frame 1+: [payload_frames...]
 ```
 
-### Media Messages
+**Text (with ACK & retry):**
+- Sender: Enqueues via `TextQoS.send()`, which tracks msg_id and retries on timeout
+- Broker: Receives, sends ACK to client_id (via ROUTER identity)
+- Client: `TextQoS.ack(msg_id)` removes from pending on ACK receipt
+- Max 5 retries, 0.2s interval
 
-```txt
-TEXT:<seq>:<timestamp>:<content>
-AUDIO:<seq>:<timestamp>:<data>
-VIDEO:<seq>:<timestamp>:<frame_data>
+**Audio/Video (no ACK):**
+- Sender: `VideoQoS.should_send()` gates frames based on FPS; encodes JPEG
+- Broker: Broadcasts to subscribers immediately (no ACK)
+- Dropped frames tolerated in real-time
+
+### Presence Messages (Broker → Clients via PUB/SUB)
+
+```json
+Topic: "text:A"
+{"v": 1, "type": "presence", "room": "A", "members": {"client-id-1": "alice", "client-id-2": "bob", ...}}
+```
+
+### Inter-Broker Relay (DEALER→ROUTER)
+
+```json
+// Relay header (Frame 1):
+{
+  "v": 1,
+  "type": "relay",
+  "channel": "text|audio|video",
+  "room": "F",
+  "hop": 1
+}
+// Frames 2+: base64-encoded payload (to avoid ZMQ multipart issues)
+```
+
+### Registry Messages (REQ/REP)
+
+```json
+CLIENT → REGISTRY:
+{"type": "query_room", "room": "A"}
+← {"status": "ok", "broker": {"broker_id": "...", "host": "127.0.0.1", "ports": {...}, "rooms": ["A", "B", "C", "D"]}}
+
+BROKER → REGISTRY:
+{"type": "register", "broker_id": "...", "host": "127.0.0.1", "ports": {...}, "rooms": ["A", "B", "C", "D"]}
+← {"status": "ok"}
+
+{"type": "heartbeat", "broker_id": "..."}
+← {"status": "ok"}
+
+{"type": "list_brokers"}
+← {"status": "ok", "brokers": [{...}, {...}, ...]}
 ```
 
 ---
 
-## Execution Flow
+## Stress Test & Demo (run_demo.py)
 
-### Starting the System
+**Scenario:**
+1. Start Registry
+2. Start Broker-0 (rooms A–D) and Broker-1 (rooms E–H)
+3. Connect alice, bob to room A (on Broker-0); carol to room F (on Broker-1)
+4. Exchange text messages (demonstrates ACK + retry)
+5. **Simulate Broker-0 failure** (kill -9)
+6. Wait for alice & bob to detect via heartbeat timeout (~6s)
+7. Start Broker-2 (rooms A–D, different instance)
+8. Alice & bob reconnect automatically (Registry reassigns rooms to Broker-2)
+9. Exchange messages again post-reconnect
+10. Verify carol (Broker-1) remained unaffected
 
-1. Start Registry Broker (runs first):
+**Validates:**
+- Service discovery (Registry)
+- Broker mesh and peer discovery
+- Heartbeat-based liveness detection
+- Automatic reconnection with state preservation
+- Room reassignment on broker death
+- Message continuity post-reconnect
 
-   ```bash
-   ./run_broker.sh --registry
-   ```
 
-2. Start Worker Brokers (any number):
-
-   ```bash
-   ./run_broker.sh  # worker broker, registers with registry
-   ```
-
-3. Start Clients:
-
-   ```bash
-   ./run_client.sh
-   ```
-
-### Client Flow
-
-1. User enters username
-2. Client broadcasts to discover brokers
-3. Registry responds with broker list
-4. Client selects broker (via round-robin or ping)
-5. Client connects, creates/joins room
-6. Media flows via broker's pub/sub channels
-7. User can create/join rooms or call individual users
-8. Media flows via pub/sub channels
 
 ---
+
+## File Structure
+
+```
+sd-meeting-app/
+├── registry.py           ← Service Discovery (REQ/REP, room reassignment)
+├── broker.py             ← Distributed broker (rooms, QoS, inter-broker, heartbeat)
+├── client.py             ← CLI client with resilient reconnect
+├── client_gui.py         ← Tkinter GUI client with multi-participant video grid
+├── run_demo.py           ← Automated demo: broker failover + reconnect
+├── config.yaml           ← Ports, QoS, rooms, heartbeat intervals
+├── requirements.txt      ← Python dependencies
+├── run_registry.sh       ← Launch registry
+├── run_broker.sh         ← Launch broker (accepts index: 0, 1, 2)
+├── run_client.sh         ← Launch CLI client
+├── run_demo.sh           ← Launch demo
+├── README.md             ← Quick start, team, installation, run instructions
+└── PLAN.md               ← This file: architecture, implementation, design decisions
+```
 
 ## Dependencies
 
-- Python 3.x
-- pyzmq
-- pyaudio
-- opencv-python
-- numpy
-- pyyaml
+- **Python 3.11+**
+- **pyzmq**: ZeroMQ bindings for async messaging
+- **pyaudio**: Audio capture/playback
+- **opencv-python**: Video capture
+- **Pillow (PIL)**: Image rendering for video tiles
+- **numpy**: Numerical operations
+- **pyyaml**: Configuration loading
