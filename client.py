@@ -203,6 +203,8 @@ class GUIClientSession:
 
         self._gui_q    = gui_q
         self._stop     = stop
+        self._camera_enabled = threading.Event()
+        self._camera_enabled.set()  # Camera starts enabled
         self._threads: list[threading.Thread] = []
         self._socks: dict[str, zmq.Socket] = {}
         self._discovery = DiscoveryClient(cfg)
@@ -213,6 +215,17 @@ class GUIClientSession:
         """Define usuário e sala antes de conectar."""
         self.username = username
         self.room = room
+
+    def set_camera_enabled(self, enabled: bool):
+        """Habilita/desabilita a captura da câmera. Pausa/despausa a thread."""
+        if enabled:
+            self._camera_enabled.set()
+        else:
+            self._camera_enabled.clear()
+
+    def is_camera_enabled(self) -> bool:
+        """Confere se a câmera está atualmente habilitadad."""
+        return self._camera_enabled.is_set()
 
     # ------------------------------------------------------------------
     # Descoberta de broker
@@ -442,19 +455,37 @@ class GUIClientSession:
                 pass
 
     def _th_video_send(self):
-        """Captura vídeo da câmera e envia via ZMQ."""
+        """Captura vídeo da câmera e envia via ZMQ. Pausa quando câmera é desligada."""
         if not _VIDEO_OK or self._video_qos is None:
             return
         vcfg = self.cfg["client"]["video"]
-        try:
-            cap = cv2.VideoCapture(vcfg["device_index"])
-        except Exception:
-            return
-        if not cap.isOpened():
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  vcfg["frame_width"])
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, vcfg["frame_height"])
+        cap = None
+        
         while not self._stop.is_set():
+            # Check if camera should be enabled
+            if not self._camera_enabled.is_set():
+                # Camera disabled: release capture and wait
+                if cap:
+                    cap.release()
+                    cap = None
+                self._camera_enabled.wait(timeout=0.5)
+                continue
+            
+            # Camera enabled: ensure capture is open
+            if not cap:
+                try:
+                    cap = cv2.VideoCapture(vcfg["device_index"])
+                except Exception:
+                    self._camera_enabled.wait(timeout=1.0)
+                    continue
+                if not cap.isOpened():
+                    cap = None
+                    self._camera_enabled.wait(timeout=1.0)
+                    continue
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  vcfg["frame_width"])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, vcfg["frame_height"])
+            
+            # Capture and send frame
             ret, frame = cap.read()
             if not ret:
                 continue
@@ -475,7 +506,10 @@ class GUIClientSession:
                 self._socks["video_push"].send_multipart([meta, jpeg], flags=zmq.NOBLOCK)
             except zmq.Again:
                 self._video_qos.degrade()
-        cap.release()
+        
+        # Cleanup on exit
+        if cap:
+            cap.release()
 
     def _th_video_recv(self):
         """Recebe vídeo remoto e enfileira para GUI."""

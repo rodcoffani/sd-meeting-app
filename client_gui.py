@@ -458,9 +458,11 @@ class ConferenceApp:
         self.camera_on = not self.camera_on
         if self.camera_on:
             self._btn_camera.config(text="[CAM] Camera",   fg=C_TEXT,   bg=C_SURFACE)
+            self._network_session.set_camera_enabled(True)
         else:
             self._btn_camera.config(text="[CAM] Desligada",fg=C_ACCENT, bg="#2a1020")
             self._video_self.show_placeholder("📷 Câmera desligada")
+            self._network_session.set_camera_enabled(False)
 
     def _toggle_speaker(self):
         self.speaker_on = not self.speaker_on
@@ -496,6 +498,10 @@ class ConferenceApp:
 
     def _on_close(self):
         self._stop.set()
+        # Cleanup network and audio resources before closing
+        if self._network_session:
+            self._network_session.stop()
+        self._cleanup_audio()
         self.root.destroy()
 
     # ------------------------------------------------------------------
