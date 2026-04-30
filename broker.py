@@ -416,7 +416,7 @@ class Broker:
 
         print(f"[Broker-{self.idx}] Rodando — "
               f"text_pub={P['text_pub']} audio_pub={P['audio_pub']} "
-              f"video_pub={P['video_pub']} control={P['control']}")
+              f"video_pub={P['video_pub']} control={P['control']}",flush= True)
 
         last_hb_send  = 0.0
         last_peer_chk = 0.0

@@ -125,7 +125,7 @@ class Registry:
         rep = ctx.socket(zmq.REP)
         port = self.cfg["registry"]["port"]
         rep.bind(f"tcp://*:{port}")
-        print(f"[Registry] Escutando na porta {port}")
+        print(f"[Registry] Escutando na porta {port}",flush=True)
 
         threading.Thread(target=self._expiry_watcher, daemon=True).start()
 
