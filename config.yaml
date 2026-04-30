@@ -14,7 +14,8 @@ broker:
   port_stride: 100      # broker N usa base_port + N * stride
 
 registry:
-  host: 127.0.0.1
+  listen_host: 0.0.0.0    # what registry binds to (0.0.0.0 = all interfaces)
+  host: 127.0.0.1         # what brokers/clients connect to (override for LAN)
   port: 5500
   heartbeat_timeout: 5.0   # segundos sem heartbeat antes de expirar broker
 
@@ -25,6 +26,7 @@ cluster:
   rooms_per_broker: 4       # quantas salas cada broker gerencia
 
 client:
+  registry_host: null     # override registry host for clients (null = use registry.host)
   audio:
     rate: 44100
     channels: 1

@@ -32,6 +32,7 @@ Tolerância a falhas
 import base64
 import json
 import queue
+import socket
 import sys
 import threading
 import time
@@ -48,6 +49,23 @@ import zmq
 def _load_cfg():
     with open("config.yaml") as f:
         return yaml.safe_load(f)
+
+
+def _get_local_ip() -> str:
+    """
+    Detecta o primeiro endereço IPv4 não-loopback disponível na máquina.
+    Útil para configurar brokers em LAN sem especificar IP manualmente.
+    """
+    try:
+        # Conecta a um host remoto (não efetivamente envia dados)
+        # para determinar qual interface de rede seria usada
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 def compute_ports(idx: int, cfg: dict) -> dict:
@@ -128,7 +146,8 @@ class Broker:
     def __init__(self, idx: int, host: str = "127.0.0.1"):
         self.cfg       = _load_cfg()
         self.idx       = idx
-        self.host      = host
+        # Auto-detect local IP if host is "auto"
+        self.host      = _get_local_ip() if host.lower() == "auto" else host
         self.broker_id = str(uuid.uuid4())
         self.ports     = compute_ports(idx, self.cfg)
         self.rooms     = assign_rooms(idx, self.cfg)
@@ -148,7 +167,7 @@ class Broker:
         self._hb_interval = cl["heartbeat_interval"]
         self._hb_timeout  = cl["heartbeat_timeout"]
 
-        print(f"[Broker-{idx}] ID={self.broker_id[:8]} "
+        print(f"[Broker-{idx}] ID={self.broker_id[:8]} host={self.host} "
               f"rooms={self.rooms} ports={self.ports}")
 
     # ------------------------------------------------------------------

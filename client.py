@@ -66,8 +66,12 @@ def _load_cfg():
 class DiscoveryClient:
     """Consulta o registry para obter informações do broker responsável por uma sala."""
 
-    def __init__(self, cfg: dict):
-        self._host = cfg["registry"]["host"]
+    def __init__(self, cfg: dict, registry_host: str | None = None):
+        # Use provided registry_host or fall back to config (client.registry_host) or registry.host
+        if registry_host:
+            self._host = registry_host
+        else:
+            self._host = cfg.get("client", {}).get("registry_host") or cfg["registry"]["host"]
         self._port = cfg["registry"]["port"]
 
     def query_room(self, room: str, timeout_ms: int = 2000) -> dict | None:
@@ -643,7 +647,7 @@ class GUIClientSession:
 # ---------------------------------------------------------------------------
 
 class ClientSession:
-    def __init__(self, username: str | None, room: str | None, no_av: bool):
+    def __init__(self, username: str | None, room: str | None, no_av: bool, registry_host: str | None = None):
         self.cfg       = _load_cfg()
         self.client_id = str(uuid.uuid4())
         self.username  = username
@@ -653,7 +657,7 @@ class ClientSession:
 
         self._stop   = threading.Event()
         self._threads: list[threading.Thread] = []
-        self._discovery = DiscoveryClient(self.cfg)
+        self._discovery = DiscoveryClient(self.cfg, registry_host)
         self._text_qos  = TextQoS(self.cfg)
         self._video_qos = VideoQoS(self.cfg) if (_VIDEO_OK and not no_av) else None
 
@@ -1069,6 +1073,8 @@ def _parse_args():
     p.add_argument("--room",     default=None, help="Sala (A-K)")
     p.add_argument("--no-av",   action="store_true",
                    help="Desativa áudio e vídeo (modo texto)")
+    p.add_argument("--registry-host", default=None,
+                   help="Host do registry (override config.yaml)")
     return p.parse_args()
 
 
@@ -1078,4 +1084,5 @@ if __name__ == "__main__":
         username=args.username,
         room=args.room,
         no_av=args.no_av,
+        registry_host=args.registry_host,
     ).run()
