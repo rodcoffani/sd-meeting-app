@@ -36,6 +36,11 @@ class Registry:
         self._room_map = {}  # room -> broker_id
         self._lock = threading.Lock()
 
+    def _pick_broker_for_room(self) -> dict | None:
+        if not self._brokers:
+            return None
+        return min(self._brokers.values(), key=lambda b: len(b.get("rooms", [])))
+
     # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
@@ -67,7 +72,11 @@ class Registry:
         with self._lock:
             bid = self._room_map.get(room)
             if not bid or bid not in self._brokers:
-                return {"status": "not_found"}
+                broker = self._pick_broker_for_room()
+                if not broker:
+                    return {"status": "not_found"}
+                self._room_map[room] = broker["broker_id"]
+                bid = broker["broker_id"]
             b = self._brokers[bid]
             return {"status": "ok", "broker": {
                 "broker_id": b["broker_id"],

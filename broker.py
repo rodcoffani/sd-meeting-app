@@ -255,8 +255,9 @@ class Broker:
                                                   flags=zmq.NOBLOCK)
                 except Exception as e:
                     print(f"[Broker-{self.idx}] Erro ao encaminhar: {e}")
-                return
+                return True
         print(f"[Broker-{self.idx}] Nenhum peer encontrado para sala {room}")
+        return False
 
     def _route(self, channel: str, room: str, frames: list,
                text_pub, audio_pub, video_pub):
@@ -264,7 +265,10 @@ class Broker:
         if room in self.room_set:
             self._broadcast(channel, room, frames, text_pub, audio_pub, video_pub)
         else:
-            self._forward_to_peer(channel, room, frames)
+            # If the registry reassigned the room to this broker, local broadcast
+            # is the correct behavior even if the static room_set was not updated.
+            if not self._forward_to_peer(channel, room, frames):
+                self._broadcast(channel, room, frames, text_pub, audio_pub, video_pub)
 
     # ------------------------------------------------------------------
     # Handlers de eventos do poller

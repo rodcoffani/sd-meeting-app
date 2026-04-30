@@ -185,13 +185,16 @@ class ConferenceApp:
 
         # Sincronização entre threads e GUI
         self._stop    = threading.Event()
+        self._session_stop = threading.Event()
         self._gui_q:  queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
         self._discovery = DiscoveryClient(self.cfg)
+        self._reconnect_lock = threading.Lock()
+        self._reconnect_in_progress = False
 
         # Network session
-        self._network_session = GUIClientSession(self.cfg, self.client_id, 
-                                                 self._gui_q, self._stop)
+        self._network_session = GUIClientSession(self.cfg, self.client_id,
+                                                 self._gui_q, self._session_stop)
 
         # Audio callback buffering
         self.recv_queue = queue.Queue()  # Buffers received audio frames for output callback
@@ -492,24 +495,25 @@ class ConferenceApp:
     def _leave(self):
         if messagebox.askyesno("Sair", "Deseja sair da sala?",
                                parent=self.root):
-            self._stop.set()
+            self._session_stop.set()
             self._network_session.stop()
             self._cleanup_audio()
             self._clear_video_panels()
             self._conf_frame.destroy()
             self._build_login()
             self.root.geometry("420x340")
-            self._stop.clear()
+            self._session_stop = threading.Event()
             self.broker    = None
             self.username  = None
             self.room      = None
             self._participant_names = {}
             self._video_panels = {}
             self._network_session = GUIClientSession(self.cfg, self.client_id,
-                                                     self._gui_q, self._stop)
+                                                     self._gui_q, self._session_stop)
 
     def _on_close(self):
         self._stop.set()
+        self._session_stop.set()
         # Cleanup network and audio resources before closing
         if self._network_session:
             self._network_session.stop()
@@ -551,6 +555,7 @@ class ConferenceApp:
                                             fg=C_ACCENT)
                     self._clear_video_panels()
                     self._append_sys("Broker desconectado. Reconectando...")
+                    self._start_reconnect_flow()
                 elif t == "reconnected":
                     self._status_lbl.config(text="● Conectado", fg=C_GREEN)
                     self._append_sys("Reconectado com sucesso!")
@@ -687,6 +692,56 @@ class ConferenceApp:
             except Exception:
                 pass
             self.p = None
+
+    def _start_reconnect_flow(self):
+        with self._reconnect_lock:
+            if self._reconnect_in_progress or self._stop.is_set():
+                return
+            self._reconnect_in_progress = True
+        threading.Thread(target=self._reconnect_worker, daemon=True).start()
+
+    def _reconnect_worker(self):
+        try:
+            old_session = self._network_session
+            if old_session:
+                old_session.stop()
+
+            self._cleanup_audio()
+
+            if not self.username or not self.room:
+                return
+
+            self._session_stop = threading.Event()
+            new_session = GUIClientSession(self.cfg, self.client_id,
+                                           self._gui_q, self._session_stop)
+            new_session.set_credentials(self.username, self.room)
+            new_session.set_camera_enabled(self.camera_on)
+
+            for i in range(15):
+                if self._stop.is_set():
+                    return
+                if new_session.discover_broker(max_retries=1, delay=0):
+                    self.broker = new_session.broker
+                    if new_session.start(self.recv_queue):
+                        self._network_session = new_session
+                        self._start_audio_stream()
+                        self.root.after(0, lambda: self._status_lbl.config(
+                            text="● Conectado", fg=C_GREEN))
+                        self.root.after(0, lambda: self._append_sys(
+                            "Conectado ao novo broker."))
+                        self.root.after(0, self._update_video_status)
+                        return
+                self.root.after(0, lambda i=i: self._status_lbl.config(
+                    text=f"⚠ Reconectando... ({i+1}/15)", fg=C_ACCENT))
+                time.sleep(1)
+
+            self.root.after(0, lambda: self._status_lbl.config(
+                text="⚠ Falha ao reconectar", fg=C_ACCENT))
+            self.root.after(0, lambda: self._append_sys(
+                "Não foi possível transferir para outro broker."))
+        finally:
+            with self._reconnect_lock:
+                self._reconnect_in_progress = False
 
     # ------------------------------------------------------------------
     # Gerenciamento de rede via GUIClientSession

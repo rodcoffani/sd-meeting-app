@@ -16,11 +16,11 @@ broker:
 registry:
   host: 127.0.0.1
   port: 5500
-  heartbeat_timeout: 6.0   # segundos sem heartbeat antes de expirar broker
+  heartbeat_timeout: 5.0   # segundos sem heartbeat antes de expirar broker
 
 cluster:
   heartbeat_interval: 2.0  # intervalo entre heartbeats (segundos)
-  heartbeat_timeout: 6.0
+  heartbeat_timeout: 5.0
   all_rooms: [A, B, C, D, E, F, G, H, I, J, K]
   rooms_per_broker: 4       # quantas salas cada broker gerencia
 
