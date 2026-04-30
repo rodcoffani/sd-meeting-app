@@ -18,16 +18,16 @@ Sistema de videoconferência distribuído, resiliente e escalável, construído 
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                      Registry                         │  ← Service Discovery (REQ/REP)
-│                  (porta 5500)                         │
+│                      Registry                        │  ← Service Discovery (REQ/REP)
+│                  (porta 5500)                        │
 └──────────────┬───────────────────────────────────────┘
                │ register / heartbeat / query_room
        ┌───────┴────────┐
        ▼                ▼
-┌─────────────┐  ┌─────────────┐       Inter-broker
+┌─────────────┐   ┌─────────────┐       Inter-broker
 │  Broker-0   │◄─►│  Broker-1   │  ←  ROUTER/DEALER + heartbeat PUB/SUB
-│  Salas A-D  │  │  Salas E-H  │
-└──────┬──────┘  └──────┬──────┘
+│  Salas A-D  │   │  Salas E-H  │
+└──────┬──────┘   └──────┬──────┘
        │ PULL/PUB        │ PULL/PUB
   ┌────┴────┐       ┌────┴────┐
   │  alice  │       │  carol  │   ← PUSH/SUB/DEALER (texto, áudio, vídeo)
