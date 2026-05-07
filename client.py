@@ -512,8 +512,9 @@ class GUIClientSession:
             ret, frame = cap.read()
             if not ret:
                 continue
-            # Envia para GUI para self-preview
-            self._gui_q.put({"type": "video_self", "frame": frame.copy()})
+            # Envia para GUI para self-preview (espelhado horizontalmente)
+            frame_flipped = cv2.flip(frame, 1)  # 1 = flip horizontal
+            self._gui_q.put({"type": "video_self", "frame": frame_flipped})
             if not self._video_qos.should_send():
                 time.sleep(0.01)
                 continue

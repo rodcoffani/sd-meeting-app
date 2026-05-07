@@ -14,7 +14,7 @@ broker:
   port_stride: 100      # broker N usa base_port + N * stride
 
 registry:
-  host: 127.0.0.1
+  host: localhost
   port: 5500
   heartbeat_timeout: 5.0   # segundos sem heartbeat antes de expirar broker
 
